@@ -1,0 +1,34 @@
+# ============================================================
+#  Traffic Tracker AI — Laptop Requirements
+# ============================================================
+
+# Core
+torch>=2.1.0
+torchvision>=0.16.0
+ultralytics>=8.2.0          # YOLOv8 + ByteTrack
+
+# OCR
+easyocr>=1.7.1
+opencv-python==4.9.0.80
+Pillow>=10.0.0
+
+# Image processing
+numpy>=1.24.0
+scipy>=1.11.0               # deskew
+
+# Dataset download
+kagglehub>=0.2.0
+datasets>=2.18.0            # HuggingFace datasets (streaming Stanford Cars)
+huggingface-hub>=0.22.0
+
+# Dashboard
+gradio>=4.28.0
+
+# Utilities
+pyyaml>=6.0.1
+pandas>=2.0.0
+matplotlib>=3.8.0
+tqdm>=4.66.0
+
+# ONNX (optional — faster CPU inference)
+onnxruntime>=1.17.0

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Traffic Tracker logs & snapshots
+logs/
+*.log
+
+# Large AI model weights & datasets (exceeds GitHub 100MB limit)
+models/*.pt
+models/*.onnx
+models/*.engine
+models_old/
+*.pt
+*.onnx
+*.engine
+data/
+
+# Video files
+*.mp4
+*.avi
+*.mov
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
