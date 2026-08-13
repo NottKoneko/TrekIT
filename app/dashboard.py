@@ -18,6 +18,7 @@ import logging
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 
 import cv2
 import gradio as gr
