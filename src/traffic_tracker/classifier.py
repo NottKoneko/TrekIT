@@ -112,6 +112,10 @@ class VehicleClassifier:
         self.input_size = self.cfg_clf.get("input_size", 224)
         self.conf_cutoff = self.cfg_clf.get("confidence_cutoff", 0.40)
 
+        # Default class lists fallback
+        self.color_classes = ["Black", "Blue", "Brown", "Green", "Grey", "Orange", "Pink", "Purple", "Red", "Silver", "White", "Yellow"]
+        self.type_classes = ["Convertible", "Coupe", "Hatchback", "SUV", "Sedan", "Truck", "Van"]
+
         # Try loading exact class names from JSON files if present
         models_dir = Path(self.cfg_paths.get("models_dir", "models"))
         color_json = models_dir / "color_classes.json"
