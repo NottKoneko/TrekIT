@@ -508,7 +508,7 @@ with gr.Blocks(title="Traffic Tracker") as demo:
 
 if __name__ == "__main__":
     demo.launch(
-        server_name="127.0.0.1",
+        server_name="0.0.0.0",
         server_port=7860,
         max_file_size="1000mb",
         theme=gr.themes.Base(
@@ -518,5 +518,5 @@ if __name__ == "__main__":
         ),
         css=CSS,
         show_error=True,
-        share=False,
+        share=True,
     )
