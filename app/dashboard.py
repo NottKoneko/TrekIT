@@ -120,16 +120,26 @@ def _reencode_h264(src_path: str) -> str:
 
 # ── Tab 1: Video Analysis ───────────────────────────────────────────────────
 
-def process_video(video_path, fast_mode=False, progress=gr.Progress(track_tqdm=True)):
-    if not video_path:
-        return None, "No video uploaded.", records_to_df([])
+def process_video(
+    uploaded_video,
+    local_video_path: str = "",
+    fast_mode: bool = False,
+    progress=gr.Progress(),
+) -> Tuple[Optional[str], str, pd.DataFrame]:
+    """
+    Processes a video file (either uploaded via browser or specified by local file path)
+    frame-by-frame and exports an annotated output video.
+    """
+    video_path = local_video_path.strip() if local_video_path and local_video_path.strip() else uploaded_video
 
-    # gr.Video returns a plain string path; normalise just in case
+    if not video_path:
+        return None, "No video provided. Upload a file or enter a local path.", records_to_df([])
+
     if hasattr(video_path, "name"):
         video_path = video_path.name
     elif isinstance(video_path, dict):
         video_path = video_path.get("name") or video_path.get("path") or str(video_path)
-    video_path = str(video_path)
+    video_path = str(video_path).strip('"\'')
 
     try:
         reset_pipeline()
@@ -389,9 +399,13 @@ with gr.Blocks(title="Traffic Tracker") as demo:
             with gr.Row():
                 with gr.Column(scale=1):
                     vid_input = gr.Video(
-                        label="Upload Video File (.mp4, .mov, .avi, .mkv)",
-                        height=240,
+                        label="Option A: Upload Video File",
+                        height=180,
                         sources=["upload"],
+                    )
+                    local_path_input = gr.Textbox(
+                        label="Option B: Local Video Path (Bypasses web upload limit)",
+                        placeholder=r"e.g. C:\Code Projects\Trafic Videos\clip_005.mp4",
                     )
                     with gr.Row():
                         vid_btn = gr.Button("Analyse Video", variant="primary", size="lg")
@@ -410,7 +424,7 @@ with gr.Blocks(title="Traffic Tracker") as demo:
             vid_table = gr.DataFrame(label="Detection Results", wrap=True)
             vid_btn.click(
                 fn=process_video,
-                inputs=[vid_input, fast_mode_chk],
+                inputs=[vid_input, local_path_input, fast_mode_chk],
                 outputs=[vid_output, vid_status, vid_table],
             )
 
