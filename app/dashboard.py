@@ -392,7 +392,6 @@ with gr.Blocks(title="Traffic Tracker") as demo:
                         label="Upload Video File (.mp4, .mov, .avi, .mkv)",
                         height=240,
                         sources=["upload"],
-                        max_file_size="1000mb",
                     )
                     with gr.Row():
                         vid_btn = gr.Button("Analyse Video", variant="primary", size="lg")
