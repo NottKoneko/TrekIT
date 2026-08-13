@@ -392,6 +392,7 @@ with gr.Blocks(title="Traffic Tracker") as demo:
                         label="Upload Video File (.mp4, .mov, .avi, .mkv)",
                         height=240,
                         sources=["upload"],
+                        max_file_size="1000mb",
                     )
                     with gr.Row():
                         vid_btn = gr.Button("Analyse Video", variant="primary", size="lg")
@@ -495,6 +496,7 @@ if __name__ == "__main__":
     demo.launch(
         server_name="127.0.0.1",
         server_port=7860,
+        max_file_size="1000mb",
         theme=gr.themes.Base(
             primary_hue="blue",
             neutral_hue="slate",
