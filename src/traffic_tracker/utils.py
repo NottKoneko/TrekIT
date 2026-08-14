@@ -75,7 +75,16 @@ def draw_vehicle_overlay(
     Draw a styled bounding box + label badge on the frame.
     Returns the modified frame (in-place modification).
     """
+    if frame is None or frame.size == 0:
+        return frame
+
+    h, w = frame.shape[:2]
     x1, y1, x2, y2 = bbox
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return frame
+
     box_colour = _COLOUR_PALETTE.get(color_label, _DEFAULT_BOX_COLOUR)
 
     # Main bounding box (2px thick)
@@ -99,7 +108,7 @@ def draw_vehicle_overlay(
     pad = 4
     badge_x1 = x1
     badge_y1 = max(0, y1 - th - 2 * pad)
-    badge_x2 = x1 + tw + 2 * pad
+    badge_x2 = min(w, x1 + tw + 2 * pad)
     badge_y2 = y1
 
     # Badge background (solid — no frame.copy() overhead)
@@ -123,12 +132,21 @@ def draw_plate_overlay(
     plate_text: str,
 ) -> np.ndarray:
     """Draw a small green box around the plate region."""
+    if frame is None or frame.size == 0:
+        return frame
+
+    h, w = frame.shape[:2]
     x1, y1, x2, y2 = bbox
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return frame
+
     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 80), 1)
     if plate_text:
         cv2.putText(
             frame, plate_text,
-            (x1, max(0, y1 - 4)),
+            (x1, max(12, y1 - 4)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.45,
             (0, 255, 80), 1, cv2.LINE_AA,
         )

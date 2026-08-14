@@ -266,12 +266,21 @@ class TrafficPipeline:
                 ocr_stride = getattr(self, "ocr_every_n", 1)
                 if self._frame_idx % max(1, ocr_stride) == 0:
                     for plate_det in plates:
+                        px1, py1, px2, py2 = plate_det.bbox
+                        pw = px2 - px1
+                        ph = py2 - py1
+
+                        # Resolution Gate: Skip OCR if plate is too distant/small (saves CPU & prevents garbage)
+                        if pw < 50 or ph < 20:
+                            continue
+
                         plate_crop = crop_bbox(frame, plate_det.bbox)
                         if plate_crop is not None:
                             text, conf = self.ocr.read(plate_crop)
                             state.ocr_attempts += 1
-                            if text and len(text) >= 2:
-                                state.plate_votes[text] += conf ** 2
+                            if text and len(text) >= 5:
+                                # Weight by confidence cubed so clearer close-up frames override distant guesses
+                                state.plate_votes[text] += (conf ** 3)
                                 break
 
             # ── Draw plate box on annotated frame (highest-confidence candidate) ──
@@ -408,14 +417,14 @@ class TrafficPipeline:
         type_lbl  = "Unknown"
         plate_text = ""
 
-        if state.color_probs is not None:
+        if state.color_probs is not None and len(state.color_probs) > 0:
             c_idx = int(np.argmax(state.color_probs))
-            if state.color_probs[c_idx] >= self.classifier.conf_cutoff:
+            if 0 <= c_idx < len(self.classifier.color_classes) and state.color_probs[c_idx] >= self.classifier.conf_cutoff:
                 color_lbl = self.classifier.color_classes[c_idx]
 
-        if state.type_probs is not None:
+        if state.type_probs is not None and len(state.type_probs) > 0:
             t_idx = int(np.argmax(state.type_probs))
-            if state.type_probs[t_idx] >= self.classifier.conf_cutoff:
+            if 0 <= t_idx < len(self.classifier.type_classes) and state.type_probs[t_idx] >= self.classifier.conf_cutoff:
                 type_lbl = self.classifier.type_classes[t_idx]
 
         if state.plate_votes:

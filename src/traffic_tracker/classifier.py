@@ -188,9 +188,11 @@ class VehicleClassifier:
             except Exception as e:
                 logger.warning(f"Could not load type_classes.json: {e}")
 
-        self.device = torch.device(
-            config.get("detection", {}).get("device", "cpu")
-        )
+        dev_str = config.get("detection", {}).get("device", "cpu")
+        if dev_str == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA requested for classifier but not available. Falling back to CPU.")
+            dev_str = "cpu"
+        self.device = torch.device(dev_str)
         self.transform = _make_transform(self.input_size)
 
         self.color_model: Optional[nn.Module] = self._load_model(
@@ -210,7 +212,7 @@ class VehicleClassifier:
         """Return a 1D probability distribution over color_classes."""
         n_classes = len(self.color_classes)
         if crop_bgr is None or crop_bgr.size == 0:
-            return np.ones(n_classes, dtype=np.float32) / n_classes
+            return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
 
         if self.color_model is not None:
             return self._nn_predict_probs(crop_bgr, self.color_model)
@@ -226,7 +228,7 @@ class VehicleClassifier:
         """Return a 1D probability distribution over type_classes."""
         n_classes = len(self.type_classes)
         if crop_bgr is None or crop_bgr.size == 0:
-            return np.ones(n_classes, dtype=np.float32) / n_classes
+            return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
 
         if self.type_model is not None:
             return self._nn_predict_probs(crop_bgr, self.type_model)
@@ -253,17 +255,21 @@ class VehicleClassifier:
     def predict_color(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         """Returns (color_label, confidence)."""
         probs = self.predict_color_probs(crop_bgr)
+        if len(probs) == 0:
+            return "Unknown", 0.0
         idx = int(np.argmax(probs))
         conf = float(probs[idx])
-        label = self.color_classes[idx] if conf >= self.conf_cutoff else "Unknown"
+        label = self.color_classes[idx] if (0 <= idx < len(self.color_classes) and conf >= self.conf_cutoff) else "Unknown"
         return label, round(conf, 3)
 
     def predict_type(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         """Returns (type_label, confidence)."""
         probs = self.predict_type_probs(crop_bgr)
+        if len(probs) == 0:
+            return "Unknown", 0.0
         idx = int(np.argmax(probs))
         conf = float(probs[idx])
-        label = self.type_classes[idx] if conf >= self.conf_cutoff else "Unknown"
+        label = self.type_classes[idx] if (0 <= idx < len(self.type_classes) and conf >= self.conf_cutoff) else "Unknown"
         return label, round(conf, 3)
 
     # ── Internal helpers ────────────────────────────────────────────────
@@ -278,11 +284,19 @@ class VehicleClassifier:
         n_classes = len(self.color_classes) if model == self.color_model else len(self.type_classes)
         pil_img = preprocess_crop(crop_bgr)
         if pil_img is None:
-            return np.ones(n_classes, dtype=np.float32) / n_classes
+            return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
 
         tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
         logits = model(tensor)
         probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        if len(probs) != n_classes:
+            if len(probs) > n_classes:
+                probs = probs[:n_classes]
+                probs = probs / (np.sum(probs) + 1e-9)
+            else:
+                padded = np.zeros(n_classes, dtype=np.float32)
+                padded[:len(probs)] = probs
+                probs = padded
         return probs
 
     def _load_model(

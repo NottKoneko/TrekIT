@@ -153,13 +153,28 @@ def process_video(
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            return None, "❌ Could not open video file.", records_to_df([])
+            return None, "❌ Could not open video file. Please check the file path or format.", records_to_df([])
 
-        fps    = cap.get(cv2.CAP_PROP_FPS) or 25
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        if fps <= 0 or np.isnan(fps):
+            fps = 25.0
+
         width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration_sec = total_frames / max(fps, 1)
+        if total_frames < 0:
+            total_frames = 0
+
+        # If width or height could not be queried, read a probe frame
+        if width <= 0 or height <= 0:
+            ret, probe = cap.read()
+            if not ret or probe is None:
+                cap.release()
+                return None, "❌ Could not read any video frames.", records_to_df([])
+            height, width = probe.shape[:2]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        duration_sec = (total_frames / max(fps, 1.0)) if total_frames > 0 else 0.0
 
         logger.info(f"Video: {width}×{height} @ {fps:.1f}fps, {total_frames} frames ({duration_sec:.1f}s)")
 
@@ -168,7 +183,7 @@ def process_video(
         # Ensure dimensions are even (FFmpeg requirement)
         out_w = out_w if out_w % 2 == 0 else out_w - 1
         out_h = out_h if out_h % 2 == 0 else out_h - 1
-        logger.info(f"Encoding output at native resolution {out_w}×{out_h} (CRF 18 High Quality)")
+        logger.info(f"Encoding output at resolution {out_w}×{out_h} (CRF 18 High Quality)")
 
         # ── Frame stride: stride=1 processes every frame for seamless Kalman tracking
         stride = 1
@@ -194,14 +209,23 @@ def process_video(
 
         frame_idx = 0
         try:
-            for idx in progress.tqdm(range(total_frames), desc="Processing frames"):
-                if idx % stride == 0:
+            # Handle both known and unknown frame counts (streams / webm)
+            if total_frames > 0:
+                frame_iterator = progress.tqdm(range(total_frames), desc="Processing frames")
+            else:
+                frame_iterator = iter(int, 1)  # infinite generator until EOF
+
+            for idx in frame_iterator:
+                if total_frames <= 0 or idx % stride == 0:
                     ret, frame = cap.read()
-                    if not ret:
+                    if not ret or frame is None:
                         break
 
                     # Process native full-resolution frame
                     annotated, _ = pipeline.process_frame(frame)
+                    # Guarantee annotated frame matches FFmpeg buffer dimensions
+                    if annotated.shape[1] != out_w or annotated.shape[0] != out_h:
+                        annotated = cv2.resize(annotated, (out_w, out_h), interpolation=cv2.INTER_AREA)
                     ffmpeg_writer.send(annotated)
                     frame_idx += 1
                 else:
@@ -215,6 +239,9 @@ def process_video(
                 ffmpeg_writer.close()
             except Exception:
                 pass
+
+        if frame_idx == 0:
+            return None, "❌ Video contained no readable frames.", records_to_df([])
 
         _all_records.extend(pipeline.all_records)
 
@@ -233,42 +260,50 @@ def process_video(
 # ── Tab 2: Image Analysis ───────────────────────────────────────────────────
 
 def process_image(image: np.ndarray):
-    if image is None:
+    if image is None or getattr(image, "size", 0) == 0:
         return None, "No image uploaded."
 
     pipeline = get_pipeline()
-    # Gradio passes RGB numpy arrays — convert to BGR for OpenCV
-    frame_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    annotated_bgr, records = pipeline.process_image(frame_bgr)
-    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    try:
+        # Gradio passes RGB numpy arrays — convert to BGR for OpenCV
+        frame_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        annotated_bgr, records = pipeline.process_image(frame_bgr)
+        annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
 
-    lines = [f"**{len(records)} vehicle(s) detected:**"]
-    for r in records:
-        parts = []
-        if r.color and r.color != "Unknown":
-            parts.append(f"**Color:** {r.color} ({r.color_conf:.0%})")
-        if r.vehicle_type and r.vehicle_type != "Unknown":
-            parts.append(f"**Type:** {r.vehicle_type} ({r.type_conf:.0%})")
-        if r.plate_text:
-            parts.append(f"**Plate:** `{r.plate_text}`")
-        if parts:
-            lines.append("- " + " | ".join(parts))
+        lines = [f"**{len(records)} vehicle(s) detected:**"]
+        for r in records:
+            parts = []
+            if r.color and r.color != "Unknown":
+                parts.append(f"**Color:** {r.color} ({r.color_conf:.0%})")
+            if r.vehicle_type and r.vehicle_type != "Unknown":
+                parts.append(f"**Type:** {r.vehicle_type} ({r.type_conf:.0%})")
+            if r.plate_text:
+                parts.append(f"**Plate:** `{r.plate_text}`")
+            if parts:
+                lines.append("- " + " | ".join(parts))
 
-    return annotated_rgb, "\n".join(lines)
+        return annotated_rgb, "\n".join(lines)
+    except Exception as e:
+        logger.exception("Error during image processing:")
+        return image, f"❌ Error processing image: {str(e)}"
 
 
 # ── Tab 3: Live Webcam ──────────────────────────────────────────────────────
 
 def webcam_frame(frame: np.ndarray):
     """Gradio streaming callback — called once per webcam frame."""
-    if frame is None:
+    if frame is None or getattr(frame, "size", 0) == 0:
         return frame
 
     pipeline = get_pipeline()
-    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    annotated_bgr, _ = pipeline.process_frame(frame_bgr)
-    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
-    return annotated_rgb
+    try:
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        annotated_bgr, _ = pipeline.process_frame(frame_bgr)
+        annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        return annotated_rgb
+    except Exception as e:
+        logger.error(f"Error in webcam frame callback: {e}")
+        return frame
 
 
 # ── Tab 4: Analytics ────────────────────────────────────────────────────────
@@ -283,37 +318,51 @@ def build_charts():
         return None, None
 
     if not _all_records:
-        fig, ax = plt.subplots()
-        ax.text(0.5, 0.5, "No data yet — run Video Analysis first",
-                ha="center", va="center", fontsize=13, color="#888")
-        ax.axis("off")
-        return fig, fig
+        fig1, ax1 = plt.subplots(figsize=(6, 4))
+        fig1.patch.set_facecolor("#1E1E2E")
+        ax1.set_facecolor("#1E1E2E")
+        ax1.text(0.5, 0.5, "No data yet — run Video Analysis first",
+                ha="center", va="center", fontsize=12, color="#888")
+        ax1.axis("off")
+
+        fig2, ax2 = plt.subplots(figsize=(5, 5))
+        fig2.patch.set_facecolor("#1E1E2E")
+        ax2.set_facecolor("#1E1E2E")
+        ax2.text(0.5, 0.5, "No data yet — run Video Analysis first",
+                ha="center", va="center", fontsize=12, color="#888")
+        ax2.axis("off")
+        return fig1, fig2
 
     df = records_to_df(_all_records)
 
     # ── Color chart ─────────────────────────────────────────────────────
     color_counts = df[df["Color"] != "Unknown"]["Color"].value_counts()
     COLOR_MAP = {
-        "Black": "#222", "Blue": "#3A6FD8", "Brown": "#7B4A2D",
-        "Green": "#2E9E44", "Gray": "#888", "Orange": "#F47820",
-        "Red": "#D63B3B", "Silver": "#BBBFC4", "White": "#EBEBEB", "Yellow": "#F5D200",
+        "Beige": "#D4C4A8", "Black": "#222222", "Blue": "#3A6FD8", "Brown": "#7B4A2D",
+        "Gold": "#D4AF37", "Green": "#2E9E44", "Grey": "#888888", "Gray": "#888888",
+        "Orange": "#F47820", "Pink": "#FF69B4", "Purple": "#800080", "Red": "#D63B3B",
+        "Silver": "#BBBFC4", "Tan": "#D2B48C", "White": "#EBEBEB", "Yellow": "#F5D200",
     }
-    bar_colors = [COLOR_MAP.get(c, "#666") for c in color_counts.index]
+    bar_colors = [COLOR_MAP.get(c, "#666666") for c in color_counts.index]
 
     fig_color, ax = plt.subplots(figsize=(7, 4))
     fig_color.patch.set_facecolor("#1E1E2E")
     ax.set_facecolor("#1E1E2E")
-    bars = ax.bar(color_counts.index, color_counts.values, color=bar_colors, edgecolor="#333", linewidth=0.8)
-    ax.set_title("Vehicles by Color", color="#E0E0E0", fontsize=14, pad=12)
-    ax.tick_params(colors="#AAA")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    for spine in ["left", "bottom"]:
-        ax.spines[spine].set_color("#444")
-    ax.yaxis.label.set_color("#AAA")
-    for bar, val in zip(bars, color_counts.values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.2,
-                str(val), ha="center", va="bottom", color="#DDD", fontsize=10)
+    if not color_counts.empty:
+        bars = ax.bar(color_counts.index, color_counts.values, color=bar_colors, edgecolor="#333", linewidth=0.8)
+        ax.set_title("Vehicles by Color", color="#E0E0E0", fontsize=14, pad=12)
+        ax.tick_params(colors="#AAA")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        for spine in ["left", "bottom"]:
+            ax.spines[spine].set_color("#444")
+        ax.yaxis.label.set_color("#AAA")
+        for bar, val in zip(bars, color_counts.values):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.2,
+                    str(val), ha="center", va="bottom", color="#DDD", fontsize=10)
+    else:
+        ax.text(0.5, 0.5, "No identified vehicle colors yet", ha="center", va="center", color="#888", fontsize=11)
+        ax.axis("off")
     plt.tight_layout()
 
     # ── Type chart ───────────────────────────────────────────────────────
@@ -335,7 +384,10 @@ def build_charts():
         )
         for t in texts + autotexts:
             t.set_color("#DDD")
-    ax2.set_title("Vehicles by Body Type", color="#E0E0E0", fontsize=14, pad=12)
+        ax2.set_title("Vehicles by Body Type", color="#E0E0E0", fontsize=14, pad=12)
+    else:
+        ax2.text(0.5, 0.5, "No identified vehicle body types yet", ha="center", va="center", color="#888", fontsize=11)
+        ax2.axis("off")
     plt.tight_layout()
 
     return fig_color, fig_type
@@ -346,7 +398,9 @@ def build_charts():
 def export_log_csv():
     if not _all_records:
         return None
-    path = tempfile.mktemp(suffix=".csv")
+    tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+    path = tmp.name
+    tmp.close()
     export_csv(_all_records, path)
     return path
 
@@ -354,7 +408,9 @@ def export_log_csv():
 def export_log_json():
     if not _all_records:
         return None
-    path = tempfile.mktemp(suffix=".json")
+    tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    path = tmp.name
+    tmp.close()
     export_json(_all_records, path)
     return path
 

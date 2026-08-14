@@ -49,6 +49,14 @@ def _get_reader(languages: List[str], use_gpu: bool):
     return _easyocr_reader
 
 
+# Common US state plate header / footer words to reject
+US_STATE_HEADERS = {
+    "CALIFORNIA", "TEXAS", "FLORIDA", "NEWYORK", "ARIZONA",
+    "NEVADA", "OREGON", "WASHINGTON", "DMV", "CA", "EXEMPT",
+    "SESES", "STATE", "HONDA", "TOYOTA", "NISSAN", "FORD",
+}
+
+
 class PlateOCR:
     """
     Reads text from license plate image crops using EasyOCR.
@@ -61,7 +69,15 @@ class PlateOCR:
     def __init__(self, config: dict):
         self.cfg = config.get("ocr", {})
         self.languages: List[str] = self.cfg.get("languages", ["en"])
-        self.use_gpu: bool = self.cfg.get("gpu", False)
+        use_gpu = self.cfg.get("gpu", False)
+        try:
+            import torch
+            if use_gpu and not torch.cuda.is_available():
+                logger.warning("GPU requested for EasyOCR but CUDA is unavailable. Falling back to CPU.")
+                use_gpu = False
+        except Exception:
+            use_gpu = False
+        self.use_gpu: bool = use_gpu
         self.min_confidence: float = self.cfg.get("min_confidence", 0.15)
 
         pre = self.cfg.get("preprocessing", {})
@@ -77,7 +93,8 @@ class PlateOCR:
         self.do_deskew: bool = pre.get("deskew", True)
 
         self.regex_patterns: List[str] = self.cfg.get("regex_patterns", [
-            r"^[A-Z0-9]{2,12}$",
+            r"^[0-9A-Z]{5,8}$",
+            r"^[0-9][A-Z]{3}[0-9]{3}$",  # Standard California 7-character format (e.g. 9JWM255, 8MZW276)
             r"^[A-Z]{1,3}[0-9]{1,4}[A-Z]{0,3}$",
         ])
         self.strip_chars: str = self.cfg.get(
@@ -121,8 +138,14 @@ class PlateOCR:
         processed = self._preprocess(plate_crop_bgr)
         raw_results = self._run_easyocr(processed)
         out = []
-        for _, text, conf in raw_results:
-            out.append((text.strip(), float(conf)))
+        for item in raw_results:
+            if isinstance(item, (list, tuple)):
+                if len(item) >= 3:
+                    out.append((str(item[1]).strip(), float(item[2])))
+                elif len(item) == 2:
+                    out.append((str(item[0]).strip(), float(item[1])))
+            elif isinstance(item, str):
+                out.append((item.strip(), 1.0))
         return sorted(out, key=lambda x: -x[1])
 
     # ── Preprocessing pipeline ──────────────────────────────────────────
@@ -132,9 +155,8 @@ class PlateOCR:
         if self.do_grayscale:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # Bilateral filter removes MPEG compression noise & camera grain
-        # while keeping character edges razor sharp
-        img = cv2.bilateralFilter(img, d=9, sigmaColor=75, sigmaSpace=75)
+        # Gentle bilateral filter removes noise without blurring thin stroke gradients
+        img = cv2.bilateralFilter(img, d=5, sigmaColor=40, sigmaSpace=40)
 
         if self.do_clahe:
             # Clip limit 2.0 for contrast boost that preserves stroke gradients
@@ -171,13 +193,18 @@ class PlateOCR:
             # Otsu's threshold to isolate actual text characters
             _, binary = cv2.threshold(gray, 0, 255,
                                       cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            # OpenCV points format is (x, y)
             coords = np.column_stack(np.where(binary > 0))
             if coords.shape[0] < 20:
                 return gray
-            angle = cv2.minAreaRect(coords)[-1]
+            coords_xy = coords[:, ::-1]
+            rect = cv2.minAreaRect(coords_xy)
+            angle = rect[-1]
             if angle < -45:
                 angle = 90 + angle
-            if abs(angle) < 0.5:
+            elif angle > 45:
+                angle = angle - 90
+            if abs(angle) < 0.5 or abs(angle) > 45.0:
                 return gray
             (h, w) = gray.shape
             center = (w // 2, h // 2)
@@ -204,7 +231,7 @@ class PlateOCR:
                 paragraph=False,
                 detail=1,
             )
-            return results  # list of (bbox, text, confidence)
+            return results or []  # list of (bbox, text, confidence)
         except Exception as e:
             logger.warning(f"EasyOCR inference error: {e}")
             return []
@@ -213,41 +240,71 @@ class PlateOCR:
 
     def _postprocess(self, raw_results: list) -> Tuple[str, float]:
         """
-        Clean up, enforce minimum length >= 3, and validate against regex.
-        Rejects single/double character noise (like "8" or "II").
+        Filters state headers, discards short noise (<5 chars),
+        and stitches left-to-right word chunks together (e.g. '9' + 'JWM' + '255' -> '9JWM255').
         """
-        candidates: List[Tuple[str, float]] = []
+        if not raw_results:
+            return "", 0.0
 
-        for _, text, conf in raw_results:
-            conf = float(conf)
+        valid_items = []
+        for item in raw_results:
+            if not isinstance(item, (list, tuple)):
+                continue
+            if len(item) >= 3:
+                bbox, text, conf = item[0], str(item[1]), float(item[2])
+            elif len(item) == 2:
+                bbox, text, conf = None, str(item[0]), float(item[1])
+            else:
+                continue
+
             if conf < self.min_confidence:
                 continue
 
             cleaned = self._clean_text(text)
-            # Require at least 2 alphanumeric characters to prevent single-letter noise
-            if not cleaned or len(cleaned) < 2:
+            if not cleaned or cleaned in US_STATE_HEADERS:
                 continue
 
-            # Reject repetitive single character strings (e.g. "IIII", "000")
-            if len(set(cleaned)) == 1 and len(cleaned) > 2:
-                continue
+            # Get X-center coordinate to sort left-to-right
+            cx = 0.0
+            if bbox is not None and len(bbox) >= 4:
+                try:
+                    pts = np.array(bbox)
+                    cx = float(np.mean(pts[:, 0]))
+                except Exception:
+                    cx = 0.0
 
-            # Validate against configured plate patterns
-            if self._matches_plate_pattern(cleaned):
-                candidates.append((cleaned, conf))
+            valid_items.append({"text": cleaned, "conf": conf, "cx": cx})
 
-        if not candidates:
-            # Fallback to highest confidence candidate with length >= 3
-            for _, text, conf in sorted(raw_results, key=lambda x: -x[2]):
-                cleaned = self._clean_text(text)
-                if cleaned and len(cleaned) >= 3 and float(conf) >= self.min_confidence:
-                    if not (len(set(cleaned)) == 1 and len(cleaned) > 2):
-                        return cleaned, float(conf)
+        if not valid_items:
             return "", 0.0
 
-        # Return highest-confidence valid candidate
-        candidates.sort(key=lambda x: -x[1])
-        return candidates[0]
+        # Sort fragments from left to right along the plate
+        valid_items.sort(key=lambda it: it["cx"])
+
+        # Merge fragments together (e.g. '9' + 'JWM' + '255' -> '9JWM255')
+        merged_text = "".join(it["text"] for it in valid_items)
+        avg_conf = sum(it["conf"] for it in valid_items) / max(len(valid_items), 1)
+
+        # Strictly reject noise shorter than 5 characters or longer than 8
+        if len(merged_text) < 5 or len(merged_text) > 8:
+            # Fallback: check if any individual candidate is valid (5-8 chars)
+            for it in sorted(valid_items, key=lambda x: -x["conf"]):
+                if 5 <= len(it["text"]) <= 8 and self._matches_plate_pattern(it["text"]):
+                    return it["text"], round(it["conf"], 3)
+            return "", 0.0
+
+        # Reject repetitive characters (e.g. "IIIIII", "00000")
+        if len(set(merged_text)) == 1:
+            return "", 0.0
+
+        # Check pattern match
+        if not self._matches_plate_pattern(merged_text):
+            # If pattern doesn't match standard US regex, check fallback individual items
+            for it in sorted(valid_items, key=lambda x: -x["conf"]):
+                if 5 <= len(it["text"]) <= 8 and self._matches_plate_pattern(it["text"]):
+                    return it["text"], round(it["conf"], 3)
+
+        return merged_text, round(avg_conf, 3)
 
     def _clean_text(self, text: str) -> str:
         """Strip unwanted characters and normalise to uppercase."""

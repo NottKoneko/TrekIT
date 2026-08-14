@@ -82,7 +82,11 @@ class VehicleDetector:
 
         self.cfg = config.get("detection", {})
         self.track_cfg = config.get("tracking", {})
-        self.device = self.cfg.get("device", "cpu")
+        dev_str = self.cfg.get("device", "cpu")
+        if dev_str == "cuda" and not torch.cuda.is_available():
+            logger.warning("CUDA requested for detector but not available. Falling back to CPU.")
+            dev_str = "cpu"
+        self.device = dev_str
         self.conf_thresh = self.cfg.get("confidence_threshold", 0.45)
         self.iou_thresh = self.cfg.get("nms_iou_threshold", 0.45)
         self.input_size = self.cfg.get("input_size", 640)
@@ -105,8 +109,6 @@ class VehicleDetector:
         else:
             logger.info("Custom plate detector not found; using main model for plates.")
 
-        self._frame_count = 0
-        # track_id → last frame plate detection ran
         self._frame_count = 0
         # track_id → last frame plate detection ran
         self._plate_last_checked: dict = {}
@@ -159,17 +161,24 @@ class VehicleDetector:
             return vehicles
 
         boxes = results[0].boxes
-        for i, cls_id in enumerate(boxes.cls.cpu().numpy().astype(int)):
+        cls_list = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else []
+        conf_list = boxes.conf.cpu().numpy().astype(float) if boxes.conf is not None else []
+        id_list = boxes.id.cpu().numpy().astype(int) if boxes.id is not None else None
+        xyxy_list = boxes.xyxy.cpu().numpy().astype(int) if boxes.xyxy is not None else []
+
+        for i, cls_id in enumerate(cls_list):
             if cls_id not in self.vehicle_class_ids:
                 continue
 
-            conf = float(boxes.conf[i].cpu())
+            conf = float(conf_list[i]) if i < len(conf_list) else 0.0
             # Filter output boxes with primary confidence threshold
             if conf < self.conf_thresh:
                 continue
 
-            track_id = int(boxes.id[i].cpu()) if boxes.id is not None else -1
-            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
+            track_id = int(id_list[i]) if (id_list is not None and i < len(id_list)) else -1
+            if i >= len(xyxy_list):
+                continue
+            x1, y1, x2, y2 = xyxy_list[i]
 
             # Scale bboxes back to original frame coordinates
             if scale != 1.0:
@@ -211,11 +220,17 @@ class VehicleDetector:
             return vehicles
 
         boxes = results[0].boxes
-        for i, cls_id in enumerate(boxes.cls.cpu().numpy().astype(int)):
+        cls_list = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else []
+        conf_list = boxes.conf.cpu().numpy().astype(float) if boxes.conf is not None else []
+        xyxy_list = boxes.xyxy.cpu().numpy().astype(int) if boxes.xyxy is not None else []
+
+        for i, cls_id in enumerate(cls_list):
             if cls_id not in self.vehicle_class_ids:
                 continue
-            conf = float(boxes.conf[i].cpu())
-            x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
+            conf = float(conf_list[i]) if i < len(conf_list) else 0.0
+            if i >= len(xyxy_list):
+                continue
+            x1, y1, x2, y2 = xyxy_list[i]
             bbox = (int(x1), int(y1), int(x2), int(y2))
             vehicle = VehicleDetection(track_id=-1, bbox=bbox, confidence=conf)
             vehicle.plates = self._detect_plates_in_crop(image, bbox)
@@ -270,9 +285,15 @@ class VehicleDetector:
                 plates: List[Detection] = []
                 if results and results[0].boxes is not None:
                     boxes = results[0].boxes
-                    for i, cls_id in enumerate(boxes.cls.cpu().numpy().astype(int)):
-                        conf = float(boxes.conf[i].cpu())
-                        px1, py1, px2, py2 = boxes.xyxy[i].cpu().numpy().astype(int)
+                    cls_list = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else []
+                    conf_list = boxes.conf.cpu().numpy().astype(float) if boxes.conf is not None else []
+                    xyxy_list = boxes.xyxy.cpu().numpy().astype(int) if boxes.xyxy is not None else []
+
+                    for i, cls_id in enumerate(cls_list):
+                        conf = float(conf_list[i]) if i < len(conf_list) else 0.0
+                        if i >= len(xyxy_list):
+                            continue
+                        px1, py1, px2, py2 = xyxy_list[i]
 
                         # Scale back if upscaled
                         if crop_scale != 1.0:
