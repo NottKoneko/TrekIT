@@ -57,18 +57,69 @@ def load_config(config_path: str = "config.yaml") -> dict:
         return {}
 
 
-# ── Per-track temporal state ────────────────────────────────────────────────
+# ── Per-track temporal state ────────────────────────────────────────────
 
 @dataclass
 class _TrackState:
-    """Accumulates per-frame predictions for one tracked vehicle."""
-    color_votes: Counter = field(default_factory=Counter)
-    type_votes: Counter = field(default_factory=Counter)
-    plate_votes: Counter = field(default_factory=Counter)
+    """Accumulates per-frame predictions for one tracked vehicle.
+
+    Votes are confidence-weighted (squared confidence) so a single clear,
+    high-confidence frame can outweigh several blurry/distant detections.
+    """
+    # defaultdict(float) stores accumulated confidence weight per label
+    color_votes: defaultdict = field(default_factory=lambda: defaultdict(float))
+    type_votes:  defaultdict = field(default_factory=lambda: defaultdict(float))
+    plate_votes: defaultdict = field(default_factory=lambda: defaultdict(float))
     frame_first_seen: int = 0
     frame_last_seen: int = 0
     ocr_attempts: int = 0
     best_crop: Optional[np.ndarray] = None   # highest-confidence frame crop
+    _best_conf: float = 0.0                  # confidence of best_crop
+
+
+
+# ── Sheet-metal crop helper ─────────────────────────────────────────────────
+
+def _get_steel_crop(
+    frame: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+    top_skip: float = 0.20,
+    bottom_skip: float = 0.20,
+    side_skip: float = 0.05,
+) -> Optional[np.ndarray]:
+    """Return the central sheet-metal band of a vehicle bounding box.
+
+    Strips the top ``top_skip`` fraction (roof, windshield) and the bottom
+    ``bottom_skip`` fraction (tyres, road surface) so the color classifier
+    sees actual paint rather than black rubber or tinted glass.
+
+    Args:
+        frame: Full BGR frame.
+        bbox: Vehicle bounding box (x1, y1, x2, y2).
+        top_skip: Fraction of bbox height to remove from the top.
+        bottom_skip: Fraction of bbox height to remove from the bottom.
+        side_skip: Fraction of bbox width to remove from each side.
+
+    Returns:
+        Cropped numpy array or None if the resulting crop is empty.
+    """
+    x1, y1, x2, y2 = bbox
+    h, w = frame.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    bh = y2 - y1
+    bw = x2 - x1
+    if bh <= 20 or bw <= 20:
+        return None
+
+    sy1 = y1 + int(bh * top_skip)
+    sy2 = y2 - int(bh * bottom_skip)
+    sx1 = x1 + int(bw * side_skip)
+    sx2 = x2 - int(bw * side_skip)
+
+    if sy2 <= sy1 or sx2 <= sx1:
+        return None
+    return frame[sy1:sy2, sx1:sx2].copy()
 
 
 # ── Main pipeline class ─────────────────────────────────────────────────────
@@ -163,37 +214,42 @@ class TrafficPipeline:
             # Crop the vehicle region
             crop = crop_bbox(frame, vehicle.bbox, padding=4)
 
+            # ── Sheet-metal sub-crop for colour classification ────────────────
+            # Strip top 20% (roof/glass) and bottom 20% (tires/ground) so
+            # the classifier sees paint, not rubber or tinted windshield.
+            steel_crop = _get_steel_crop(frame, vehicle.bbox)
+
             # Use detector plates if fresh, else fall back to cached plates
             if vehicle.plates:
                 self._cached_plates[tid] = vehicle.plates
             plates = self._cached_plates.get(tid, [])
 
-            # ── Classification (skip-frame) ──────────────────────────────
+            # ── Classification (skip-frame, confidence-weighted) ────────────
             if (
-                crop is not None
+                steel_crop is not None
                 and self._frame_idx % self.classify_every_n == 0
             ):
-                color_lbl, color_conf = self.classifier.predict_color(crop)
-                type_lbl, type_conf = self.classifier.predict_type(crop)
+                color_lbl, color_conf = self.classifier.predict_color(steel_crop)
+                type_lbl,  type_conf  = self.classifier.predict_type(crop)
 
-                state.color_votes[color_lbl] += 1
-                state.type_votes[type_lbl] += 1
+                # Square the confidence so high-confidence frames count
+                # exponentially more than low-confidence distant frames.
+                state.color_votes[color_lbl] += color_conf ** 2
+                state.type_votes[type_lbl]   += type_conf  ** 2
 
-                if (
-                    state.best_crop is None
-                    or color_conf > getattr(state, "_best_conf", 0)
-                ):
-                    state.best_crop = crop
+                if color_conf > state._best_conf:
+                    state.best_crop  = steel_crop
                     state._best_conf = color_conf
 
-            # ── OCR on plate sub-regions (cached & skip-frame for speed) ───
+            # ── OCR on plate sub-regions (cached & skip-frame for speed) ─────
             for plate_det in plates:
                 # Check if we already have a stable plate for this track or reached max attempts
-                ocr_attempts = getattr(state, "ocr_attempts", 0)
-                already_has_plate = bool(
-                    state.plate_votes
-                    and state.plate_votes.most_common(1)[0][1] >= 3
+                ocr_attempts = state.ocr_attempts
+                # "Stable" = best plate has accumulated weight ≥ threshold
+                best_plate_weight = (
+                    max(state.plate_votes.values()) if state.plate_votes else 0.0
                 )
+                already_has_plate = best_plate_weight >= 1.5  # ~2 confident reads
 
                 if not already_has_plate and ocr_attempts < 6:
                     if self._frame_idx % getattr(self, "ocr_every_n", 3) == 0:
@@ -202,10 +258,14 @@ class TrafficPipeline:
                             text, conf = self.ocr.read(plate_crop)
                             state.ocr_attempts = ocr_attempts + 1
                             if text:
-                                state.plate_votes[text] += 1
+                                # Weight plate reads by confidence squared
+                                state.plate_votes[text] += conf ** 2
 
                 # Draw plate box on annotated frame
-                current_plate = state.plate_votes.most_common(1)[0][0] if state.plate_votes else ""
+                current_plate = (
+                    max(state.plate_votes, key=state.plate_votes.get)
+                    if state.plate_votes else ""
+                )
                 draw_plate_overlay(annotated, plate_det.bbox, current_plate)
 
             # ── Derive stable labels from votes ──────────────────────────
@@ -257,13 +317,15 @@ class TrafficPipeline:
         records: List[VehicleRecord] = []
 
         for i, vehicle in enumerate(vehicles):
-            crop = crop_bbox(image, vehicle.bbox, padding=4)
+            crop       = crop_bbox(image, vehicle.bbox, padding=4)
+            steel_crop = _get_steel_crop(image, vehicle.bbox)
             color_lbl, color_conf = ("Unknown", 0.0)
-            type_lbl, type_conf = ("Unknown", 0.0)
+            type_lbl, type_conf   = ("Unknown", 0.0)
             plate_text = ""
 
+            if steel_crop is not None:
+                color_lbl, color_conf = self.classifier.predict_color(steel_crop)
             if crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(crop)
                 type_lbl, type_conf = self.classifier.predict_type(crop)
 
             for plate_det in vehicle.plates:
@@ -315,21 +377,25 @@ class TrafficPipeline:
     def _get_stable_labels(
         self, state: _TrackState
     ) -> Tuple[str, str, str]:
-        """Return majority-vote labels if enough votes accumulated."""
+        """Return best-weighted labels if enough accumulated confidence.
+
+        With confidence-squared weighting, min_votes acts as a minimum
+        accumulated confidence weight (not a raw frame count).
+        """
         color_lbl = "Unknown"
-        type_lbl = "Unknown"
+        type_lbl  = "Unknown"
         plate_text = ""
 
         total_color = sum(state.color_votes.values())
         if total_color >= self.min_votes and state.color_votes:
-            color_lbl = state.color_votes.most_common(1)[0][0]
+            color_lbl = max(state.color_votes, key=state.color_votes.get)
 
         total_type = sum(state.type_votes.values())
         if total_type >= self.min_votes and state.type_votes:
-            type_lbl = state.type_votes.most_common(1)[0][0]
+            type_lbl = max(state.type_votes, key=state.type_votes.get)
 
         if state.plate_votes:
-            plate_text = state.plate_votes.most_common(1)[0][0]
+            plate_text = max(state.plate_votes, key=state.plate_votes.get)
 
         return color_lbl, type_lbl, plate_text
 
@@ -342,14 +408,18 @@ class TrafficPipeline:
         plate_text: str,
     ):
         """Create or update a VehicleRecord for this track."""
+        color_total = sum(state.color_votes.values())
+        type_total  = sum(state.type_votes.values())
+        plate_total = sum(state.plate_votes.values())
+
         color_conf = (
-            state.color_votes[color_lbl] / max(sum(state.color_votes.values()), 1)
+            state.color_votes[color_lbl] / max(color_total, 1e-9)
         )
         type_conf = (
-            state.type_votes[type_lbl] / max(sum(state.type_votes.values()), 1)
+            state.type_votes[type_lbl] / max(type_total, 1e-9)
         )
         plate_conf = (
-            state.plate_votes[plate_text] / max(sum(state.plate_votes.values()), 1)
+            state.plate_votes[plate_text] / max(plate_total, 1e-9)
             if plate_text else 0.0
         )
 

@@ -18,16 +18,22 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ── Colour palette for bounding box overlays ──────────────────────────────
-# Maps vehicle colour names → BGR drawing colours
+# Maps vehicle colour names → BGR drawing colours (keys match color_classes.json)
 _COLOUR_PALETTE: Dict[str, Tuple[int, int, int]] = {
+    "Beige":   (180, 210, 230),
     "Black":   (60, 60, 60),
     "Blue":    (230, 120, 30),
     "Brown":   (42, 82, 130),
+    "Gold":    (0, 185, 215),
     "Green":   (40, 180, 40),
-    "Gray":    (160, 160, 160),
+    "Grey":    (160, 160, 160),
+    "Gray":    (160, 160, 160),   # legacy alias — kept for safety
     "Orange":  (0, 140, 255),
+    "Pink":    (180, 105, 255),
+    "Purple":  (200, 50, 130),
     "Red":     (30, 30, 220),
     "Silver":  (200, 200, 200),
+    "Tan":     (90, 160, 195),
     "White":   (240, 240, 240),
     "Yellow":  (0, 220, 220),
     "Unknown": (80, 80, 80),

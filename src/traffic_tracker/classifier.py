@@ -1,7 +1,7 @@
 """
 classifier.py
 -------------
-MobileNetV3-Small classifier for vehicle color and body type.
+MobileNetV3-Large classifier for vehicle color and body type.
 
 Two separate single-task models (color, type) — simpler and more reliable
 than multi-task on limited training data.
@@ -9,6 +9,8 @@ than multi-task on limited training data.
 Fallback behaviour (before Colab training):
   - Color: HSV-histogram KNN classifier (no neural net needed)
   - Body type: returns "Unknown" — requires fine-tuned weights
+
+NOTE: Training notebook uses MobileNetV3-Large. This file MUST stay in sync.
 """
 
 import logging
@@ -86,9 +88,14 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
 
 # ── MobileNetV3 Builder ─────────────────────────────────────────────────────
 def _build_mobilenet(num_classes: int) -> nn.Module:
-    """Build a MobileNetV3-Small model matching torchvision layout."""
-    base = models.mobilenet_v3_small(
-        weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
+    """Build a MobileNetV3-Large model matching torchvision layout.
+
+    Uses Large to match the training notebook (mobilenet_v3_large).
+    Large has a 1280-dim classifier head vs 576 in Small — state dict
+    will fail to load if the wrong variant is used here.
+    """
+    base = models.mobilenet_v3_large(
+        weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
     )
     in_features = base.classifier[-1].in_features
     base.classifier[-1] = nn.Linear(in_features, num_classes)
@@ -112,8 +119,12 @@ class VehicleClassifier:
         self.input_size = self.cfg_clf.get("input_size", 224)
         self.conf_cutoff = self.cfg_clf.get("confidence_cutoff", 0.40)
 
-        # Default class lists fallback
-        self.color_classes = ["Black", "Blue", "Brown", "Green", "Grey", "Orange", "Pink", "Purple", "Red", "Silver", "White", "Yellow"]
+        # Default class lists — must EXACTLY match the JSON files in alphabetical order
+        # (torchvision ImageFolder sorts class folders alphabetically)
+        self.color_classes = [
+            "Beige", "Black", "Blue", "Brown", "Gold", "Green", "Grey",
+            "Orange", "Pink", "Purple", "Red", "Silver", "Tan", "White", "Yellow",
+        ]
         self.type_classes = ["Convertible", "Coupe", "Hatchback", "SUV", "Sedan", "Truck", "Van"]
 
         # Try loading exact class names from JSON files if present

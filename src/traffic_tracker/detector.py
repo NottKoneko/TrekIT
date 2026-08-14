@@ -263,22 +263,11 @@ class VehicleDetector:
             except Exception as e:
                 logger.warning(f"Plate detection failed: {e}")
 
-        # ── 2. Fallback bumper area heuristic if plate_model is missing or returned 0 detections ─────────
-        px1 = x1 + int(vw * 0.20)
-        px2 = x1 + int(vw * 0.80)
-        py1 = y1 + int(vh * 0.55)
-        py2 = y1 + int(vh * 0.95)
-
-        return [
-            Detection(
-                track_id=-1,
-                class_id=0,
-                label="license_plate",
-                confidence=0.5,
-                bbox=(px1, py1, px2, py2),
-                is_plate=True,
-            )
-        ]
+        # ── 2. No plate detected — return empty list ────────────────────────────
+        # Intentionally do NOT fall back to a geometric heuristic. A fake bumper-
+        # area box sends EasyOCR over tires, grilles, and shadows, producing
+        # hallucinated plate text. An empty list is always safer.
+        return []
 
     def _resolve_weights(self, weights_path: str) -> str:
         """

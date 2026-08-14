@@ -53,8 +53,13 @@ class PlateOCR:
         pre = self.cfg.get("preprocessing", {})
         self.do_grayscale: bool = pre.get("grayscale", True)
         self.do_clahe: bool = pre.get("clahe", True)
-        self.do_adaptive_thresh: bool = pre.get("adaptive_threshold", True)
-        self.do_morph: bool = pre.get("morph_cleanup", True)
+        # NOTE: adaptive_threshold and morph_cleanup are intentionally OFF by
+        # default. Binarising plate crops destroys the gradient information
+        # that EasyOCR's CRAFT text-detector relies on, causing missed strokes
+        # and merged character loops. Disable them unless you have a specific
+        # reason (e.g. extremely high-contrast scanned plates).
+        self.do_adaptive_thresh: bool = pre.get("adaptive_threshold", False)
+        self.do_morph: bool = pre.get("morph_cleanup", False)
         self.do_deskew: bool = pre.get("deskew", True)
 
         self.regex_patterns: List[str] = self.cfg.get("regex_patterns", [
@@ -109,12 +114,20 @@ class PlateOCR:
     # ── Preprocessing pipeline ──────────────────────────────────────────
 
     def _preprocess(self, img: np.ndarray) -> np.ndarray:
-        """Apply full preprocessing pipeline to a BGR plate crop."""
+        """Apply preprocessing pipeline to a BGR plate crop.
+
+        Aggressive binarisation (adaptive threshold, morphological ops) is
+        disabled by default because EasyOCR’s CRAFT detector expects
+        natural grey-scale gradients, not binary black-and-white images.
+        Keep grayscale + gentle CLAHE, then pass directly to EasyOCR.
+        """
         if self.do_grayscale:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         if self.do_clahe:
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+            # Clip limit 2.0 (was 3.0) for gentler contrast boost that
+            # preserves stroke gradients EasyOCR relies on.
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
             img = clahe.apply(img)
 
         if self.do_adaptive_thresh:
@@ -142,15 +155,25 @@ class PlateOCR:
 
     @staticmethod
     def _deskew(gray: np.ndarray) -> np.ndarray:
-        """Correct skew using image moments."""
+        """Correct skew using image moments on binarised foreground pixels.
+
+        The original implementation used ``np.where(gray > 0)`` which matched
+        almost every pixel in any non-black grayscale image, making the
+        bounding-box angle always 0°. This version applies Otsu’s threshold
+        to isolate actual text/foreground pixels before computing the angle.
+        """
         try:
-            coords = np.column_stack(np.where(gray > 0))
-            if coords.shape[0] < 10:
+            # Otsu's threshold to reliably isolate text foreground
+            _, binary = cv2.threshold(gray, 0, 255,
+                                      cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            coords = np.column_stack(np.where(binary > 0))
+            if coords.shape[0] < 20:   # too few foreground pixels to trust
                 return gray
             angle = cv2.minAreaRect(coords)[-1]
+            # minAreaRect returns −θ for CW rotations; adjust to intuitive range
             if angle < -45:
                 angle = 90 + angle
-            if abs(angle) < 0.5:
+            if abs(angle) < 0.5:   # skip negligible corrections
                 return gray
             (h, w) = gray.shape
             center = (w // 2, h // 2)

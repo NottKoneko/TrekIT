@@ -56,25 +56,30 @@ classification:
   confidence_cutoff: 0.35         # Min softmax confidence to accept a class label
 
   color_classes:
+    - "Beige"
     - "Black"
     - "Blue"
     - "Brown"
+    - "Gold"
     - "Green"
-    - "Gray"
+    - "Grey"
     - "Orange"
+    - "Pink"
+    - "Purple"
     - "Red"
     - "Silver"
+    - "Tan"
     - "White"
     - "Yellow"
 
   type_classes:
-    - "Sedan"
-    - "SUV"
-    - "Truck"
+    - "Convertible"
     - "Coupe"
     - "Hatchback"
+    - "SUV"
+    - "Sedan"
+    - "Truck"
     - "Van"
-    - "Convertible"
 
   classify_every_n_frames: 2     # Run classifier every 2 frames for fast voting
 
@@ -85,13 +90,13 @@ ocr:
   min_confidence: 0.20           # Lowered min OCR confidence to capture plates
   ocr_every_n_frames: 1          # Run EasyOCR every frame per vehicle
 
-  # Image preprocessing toggles (Keep natural grayscale for EasyOCR!)
+  # Image preprocessing toggles
   preprocessing:
     grayscale: true
-    clahe: true                  # Contrast enhancement
-    adaptive_threshold: false    # Disabled: binary thresholding degrades EasyOCR accuracy
-    morph_cleanup: false         # Disabled: morph ops break letter contours
-    deskew: true
+    clahe: true                  # Gentle CLAHE (clip=2.0) for contrast boost
+    adaptive_threshold: false    # OFF: binarization destroys EasyOCR gradient features
+    morph_cleanup: false         # OFF: morphological ops break letter contours for CRAFT
+    deskew: true                 # ON: fixed Otsu-based foreground isolation
 
   # Plate text post-processing
   regex_patterns:
