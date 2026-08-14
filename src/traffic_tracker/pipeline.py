@@ -257,10 +257,16 @@ class TrafficPipeline:
                         )
 
             # ── OCR on plate sub-regions (runs until a confident plate is read) ─────
-            best_plate_weight = (
-                max(state.plate_votes.values()) if state.plate_votes else 0.0
+            top_plate_text = (
+                max(state.plate_votes, key=state.plate_votes.get)
+                if state.plate_votes else ""
             )
-            already_has_plate = best_plate_weight >= 1.5
+            best_plate_weight = state.plate_votes.get(top_plate_text, 0.0)
+            
+            # Only consider locked-in if weight >= 1.5 AND top candidate matches valid plate regex
+            already_has_plate = (
+                best_plate_weight >= 1.5 and self.ocr._matches_plate_pattern(top_plate_text)
+            )
 
             if not already_has_plate and plates:
                 ocr_stride = getattr(self, "ocr_every_n", 1)
@@ -271,7 +277,7 @@ class TrafficPipeline:
                         ph = py2 - py1
 
                         # Resolution Gate: Skip OCR if plate is too distant/small (saves CPU & prevents garbage)
-                        if pw < 50 or ph < 20:
+                        if pw < 45 or ph < 18:
                             continue
 
                         plate_crop = crop_bbox(frame, plate_det.bbox)
@@ -279,9 +285,11 @@ class TrafficPipeline:
                             text, conf = self.ocr.read(plate_crop)
                             state.ocr_attempts += 1
                             if text and len(text) >= 5:
-                                # Weight by confidence cubed so clearer close-up frames override distant guesses
-                                state.plate_votes[text] += (conf ** 3)
-                                break
+                                # Bonus weight for matching standard plate regex patterns
+                                is_valid_pattern = self.ocr._matches_plate_pattern(text)
+                                mult = 2.0 if is_valid_pattern else 0.5
+                                state.plate_votes[text] += (conf ** 3) * mult
+                                # Do NOT break — evaluate all plate candidates in the frame
 
             # ── Draw plate box on annotated frame (highest-confidence candidate) ──
             if plates:

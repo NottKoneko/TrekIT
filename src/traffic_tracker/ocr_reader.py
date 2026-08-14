@@ -54,7 +54,38 @@ US_STATE_HEADERS = {
     "CALIFORNIA", "TEXAS", "FLORIDA", "NEWYORK", "ARIZONA",
     "NEVADA", "OREGON", "WASHINGTON", "DMV", "CA", "EXEMPT",
     "SESES", "STATE", "HONDA", "TOYOTA", "NISSAN", "FORD",
+    "CHEVROLET", "CADILLAC", "DODGE", "HYUNDAI", "LEXUS",
 }
+
+
+def normalize_plate_format(text: str) -> str:
+    """
+    Applies California & standard US 7-character plate format disambiguation.
+    Standard Format: 1 Digit - 3 Letters - 3 Digits (e.g. 9JWM255, 8MZW276, 1ABC123)
+    """
+    if len(text) != 7:
+        return text
+
+    DIGIT_MAP = {'O': '0', 'Q': '0', 'I': '1', 'L': '1', 'Z': '2', 'A': '4', 'S': '5', 'G': '6', 'B': '8'}
+    LETTER_MAP = {'0': 'O', '1': 'I', '2': 'Z', '4': 'A', '5': 'S', '6': 'G', '8': 'B'}
+
+    chars = list(text)
+
+    # Position 0 must be a digit
+    if chars[0] in DIGIT_MAP:
+        chars[0] = DIGIT_MAP[chars[0]]
+
+    # Positions 1, 2, 3 must be letters
+    for i in (1, 2, 3):
+        if chars[i] in LETTER_MAP:
+            chars[i] = LETTER_MAP[chars[i]]
+
+    # Positions 4, 5, 6 must be digits
+    for i in (4, 5, 6):
+        if chars[i] in DIGIT_MAP:
+            chars[i] = DIGIT_MAP[chars[i]]
+
+    return "".join(chars)
 
 
 class PlateOCR:
@@ -241,7 +272,7 @@ class PlateOCR:
     def _postprocess(self, raw_results: list) -> Tuple[str, float]:
         """
         Filters state headers, discards short noise (<5 chars),
-        and stitches left-to-right word chunks together (e.g. '9' + 'JWM' + '255' -> '9JWM255').
+        stitches left-to-right word chunks together, and disambiguates California 7-character format.
         """
         if not raw_results:
             return "", 0.0
@@ -285,26 +316,23 @@ class PlateOCR:
         merged_text = "".join(it["text"] for it in valid_items)
         avg_conf = sum(it["conf"] for it in valid_items) / max(len(valid_items), 1)
 
-        # Strictly reject noise shorter than 5 characters or longer than 8
-        if len(merged_text) < 5 or len(merged_text) > 8:
-            # Fallback: check if any individual candidate is valid (5-8 chars)
-            for it in sorted(valid_items, key=lambda x: -x["conf"]):
-                if 5 <= len(it["text"]) <= 8 and self._matches_plate_pattern(it["text"]):
-                    return it["text"], round(it["conf"], 3)
-            return "", 0.0
+        # Apply California format normalization (e.g. 1 Digit - 3 Letters - 3 Digits)
+        normalized_merged = normalize_plate_format(merged_text)
 
-        # Reject repetitive characters (e.g. "IIIIII", "00000")
-        if len(set(merged_text)) == 1:
-            return "", 0.0
+        # Check strictly for length between 5 and 8
+        if 5 <= len(normalized_merged) <= 8 and self._matches_plate_pattern(normalized_merged):
+            return normalized_merged, round(avg_conf, 3)
 
-        # Check pattern match
-        if not self._matches_plate_pattern(merged_text):
-            # If pattern doesn't match standard US regex, check fallback individual items
-            for it in sorted(valid_items, key=lambda x: -x["conf"]):
-                if 5 <= len(it["text"]) <= 8 and self._matches_plate_pattern(it["text"]):
-                    return it["text"], round(it["conf"], 3)
+        if 5 <= len(merged_text) <= 8 and self._matches_plate_pattern(merged_text):
+            return merged_text, round(avg_conf, 3)
 
-        return merged_text, round(avg_conf, 3)
+        # Fallback: check if any individual candidate is valid (5-8 chars)
+        for it in sorted(valid_items, key=lambda x: -x["conf"]):
+            candidate = normalize_plate_format(it["text"])
+            if 5 <= len(candidate) <= 8 and self._matches_plate_pattern(candidate):
+                return candidate, round(it["conf"], 3)
+
+        return "", 0.0
 
     def _clean_text(self, text: str) -> str:
         """Strip unwanted characters and normalise to uppercase."""
