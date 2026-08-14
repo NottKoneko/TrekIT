@@ -1,0 +1,11 @@
+# ByteTrack Custom Configuration for TrekIT Traffic Tracker
+# Optimized for dashcam / traffic CCTV footage to prevent track fragmentation
+
+tracker_type: bytetrack
+track_high_thresh: 0.20    # Threshold for first-round association
+track_low_thresh: 0.05     # Low-confidence threshold for second-round association (retains tracks during momentary dips)
+new_track_thresh: 0.30     # Threshold for creating a new track
+track_buffer: 60           # Retain lost tracks for 60 frames (2+ seconds) through glare, occlusion, or blur
+match_thresh: 0.70         # IoU threshold for matching
+fuse_score: True
+gmc_method: sparseOptFlow  # Global motion compensation for moving dashcam

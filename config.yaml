@@ -41,14 +41,11 @@ detection:
 
 # ── Tracking ────────────────────────────────────────────────
 tracking:
-  tracker: "bytetrack"            # Built-in ultralytics tracker
-  max_age: 30                     # Frames to keep a track alive without a match
-  min_hits: 3                     # Min consecutive detections before confirming track
-  iou_threshold: 0.3
-
-  # Temporal voting
-  vote_window: 25                 # Expanded vote window to stabilize labels across long tracks
-  min_votes: 3                    # Min votes needed to output a stable label
+  tracker: "bytetrack_custom.yaml"  # Custom ByteTrack config with 60-frame buffer
+  max_age: 60                       # 60 frames (2+ seconds) to keep lost track alive
+  min_hits: 2                       # Min consecutive detections before confirming track
+  iou_threshold: 0.3                # Association IoU threshold
+  ema_alpha: 0.25                   # Exponential Moving Average momentum for color & type smoothing
 
 # ── Classification ──────────────────────────────────────────
 classification:

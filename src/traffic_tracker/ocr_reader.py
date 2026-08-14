@@ -97,8 +97,10 @@ class PlateOCR:
 
         # Up-scale tiny crops so plate height is at least 90px for EasyOCR accuracy
         h, w = plate_crop_bgr.shape[:2]
-        if h < 90 or w < 220:
-            scale = max(90.0 / max(h, 1), 220.0 / max(w, 1))
+        # Up-scale tiny crops so plate height is at least 100px for EasyOCR accuracy
+        h, w = plate_crop_bgr.shape[:2]
+        if h < 100 or w < 260:
+            scale = max(100.0 / max(h, 1), 260.0 / max(w, 1))
             plate_crop_bgr = cv2.resize(
                 plate_crop_bgr,
                 (int(w * scale), int(h * scale)),
@@ -128,19 +130,16 @@ class PlateOCR:
     # ── Preprocessing pipeline ──────────────────────────────────────────
 
     def _preprocess(self, img: np.ndarray) -> np.ndarray:
-        """Apply preprocessing pipeline to a BGR plate crop.
-
-        Aggressive binarisation (adaptive threshold, morphological ops) is
-        disabled by default because EasyOCR’s CRAFT detector expects
-        natural grey-scale gradients, not binary black-and-white images.
-        Keep grayscale + gentle CLAHE, then pass directly to EasyOCR.
-        """
+        """Apply preprocessing pipeline to a BGR plate crop."""
         if self.do_grayscale:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
+        # Bilateral filter removes MPEG compression noise & camera grain
+        # while keeping character edges razor sharp
+        img = cv2.bilateralFilter(img, d=9, sigmaColor=75, sigmaSpace=75)
+
         if self.do_clahe:
-            # Clip limit 2.0 (was 3.0) for gentler contrast boost that
-            # preserves stroke gradients EasyOCR relies on.
+            # Clip limit 2.0 for contrast boost that preserves stroke gradients
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
             img = clahe.apply(img)
 
@@ -161,7 +160,7 @@ class PlateOCR:
         if self.do_deskew:
             img = self._deskew(img)
 
-        # Convert back to 3-channel so EasyOCR is happy
+        # Convert back to 3-channel for EasyOCR input compatibility
         if len(img.shape) == 2:
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
@@ -169,25 +168,18 @@ class PlateOCR:
 
     @staticmethod
     def _deskew(gray: np.ndarray) -> np.ndarray:
-        """Correct skew using image moments on binarised foreground pixels.
-
-        The original implementation used ``np.where(gray > 0)`` which matched
-        almost every pixel in any non-black grayscale image, making the
-        bounding-box angle always 0°. This version applies Otsu’s threshold
-        to isolate actual text/foreground pixels before computing the angle.
-        """
+        """Correct skew using image moments on binarised foreground pixels."""
         try:
-            # Otsu's threshold to reliably isolate text foreground
+            # Otsu's threshold to isolate actual text characters
             _, binary = cv2.threshold(gray, 0, 255,
                                       cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             coords = np.column_stack(np.where(binary > 0))
-            if coords.shape[0] < 20:   # too few foreground pixels to trust
+            if coords.shape[0] < 20:
                 return gray
             angle = cv2.minAreaRect(coords)[-1]
-            # minAreaRect returns −θ for CW rotations; adjust to intuitive range
             if angle < -45:
                 angle = 90 + angle
-            if abs(angle) < 0.5:   # skip negligible corrections
+            if abs(angle) < 0.5:
                 return gray
             (h, w) = gray.shape
             center = (w // 2, h // 2)
@@ -204,10 +196,16 @@ class PlateOCR:
     # ── EasyOCR inference ───────────────────────────────────────────────
 
     def _run_easyocr(self, img: np.ndarray) -> list:
-        """Run EasyOCR and return raw results list."""
+        """Run EasyOCR with alphanumeric character allowlist."""
         try:
             reader = _get_reader(self.languages, self.use_gpu)
-            results = reader.readtext(img, detail=1)
+            # Enforce alphanumeric allowlist to prevent punctuation noise
+            results = reader.readtext(
+                img,
+                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                paragraph=False,
+                detail=1,
+            )
             return results  # list of (bbox, text, confidence)
         except Exception as e:
             logger.warning(f"EasyOCR inference error: {e}")
@@ -217,8 +215,8 @@ class PlateOCR:
 
     def _postprocess(self, raw_results: list) -> Tuple[str, float]:
         """
-        Merge detected text segments, clean up, and validate with regex.
-        Returns best (text, confidence) or ("", 0.0) if nothing valid found.
+        Clean up, enforce minimum length >= 3, and validate against regex.
+        Rejects single/double character noise (like "8" or "II").
         """
         candidates: List[Tuple[str, float]] = []
 
@@ -227,22 +225,26 @@ class PlateOCR:
             if conf < self.min_confidence:
                 continue
 
-            # Clean the text
             cleaned = self._clean_text(text)
-            if not cleaned:
+            # Require at least 2 alphanumeric characters to prevent single-letter noise
+            if not cleaned or len(cleaned) < 2:
                 continue
 
-            # Validate against plate patterns
+            # Reject repetitive single character strings (e.g. "IIII", "000")
+            if len(set(cleaned)) == 1 and len(cleaned) > 2:
+                continue
+
+            # Validate against configured plate patterns
             if self._matches_plate_pattern(cleaned):
                 candidates.append((cleaned, conf))
 
         if not candidates:
-            # Return the highest-confidence segment regardless of pattern
-            # (useful for international plates with unusual formats)
+            # Fallback to highest confidence candidate with length >= 3
             for _, text, conf in sorted(raw_results, key=lambda x: -x[2]):
                 cleaned = self._clean_text(text)
-                if cleaned and float(conf) >= self.min_confidence:
-                    return cleaned, float(conf)
+                if cleaned and len(cleaned) >= 3 and float(conf) >= self.min_confidence:
+                    if not (len(set(cleaned)) == 1 and len(cleaned) > 2):
+                        return cleaned, float(conf)
             return "", 0.0
 
         # Return highest-confidence valid candidate

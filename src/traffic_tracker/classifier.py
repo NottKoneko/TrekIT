@@ -62,8 +62,8 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
     if total_pixels == 0:
         return "Unknown", 0.0
 
-    # True chromatic (vibrant color) vs achromatic (neutral) mask
-    chromatic_mask = (S >= 60) & (V >= 45)
+    # True chromatic (vibrant color) mask requires significant saturation
+    chromatic_mask = (S >= 70) & (V >= 50)
     achromatic_mask = ~chromatic_mask
 
     counts = {
@@ -74,26 +74,27 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
 
     # Chromatic classification by Hue & Value
     counts["Red"] = int((chromatic_mask & (((H >= 0) & (H <= 10)) | ((H >= 165) & (H <= 180)))).sum())
-    counts["Pink"] = int((chromatic_mask & (H > 150) & (H < 165)).sum())
-    counts["Orange"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V >= 120))).sum())
-    counts["Brown"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V < 120) & (S > 80))).sum())
-    counts["Gold"] = int((chromatic_mask & ((H > 25) & (H <= 38) & (V >= 150) & (S < 150))).sum())
-    counts["Yellow"] = int((chromatic_mask & ((H > 25) & (H <= 38) & ((V < 150) | (S >= 150)))).sum())
+    counts["Pink"] = int((chromatic_mask & (H > 150) & (H < 165) & (S < 140)).sum())
+    counts["Orange"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V >= 130))).sum())
+    counts["Brown"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V < 130) & (S > 80))).sum())
+    counts["Gold"] = int((chromatic_mask & ((H > 22) & (H <= 35) & (V >= 150) & (S >= 90) & (S < 160))).sum())
+    counts["Yellow"] = int((chromatic_mask & ((H > 22) & (H <= 38) & (V >= 150) & (S >= 160))).sum())
     counts["Green"] = int((chromatic_mask & ((H > 38) & (H <= 85))).sum())
-    counts["Blue"] = int((chromatic_mask & ((H > 85) & (H <= 135))).sum())
-    counts["Purple"] = int((chromatic_mask & ((H > 135) & (H <= 150))).sum())
+    counts["Blue"] = int((chromatic_mask & ((H > 85) & (H <= 140))).sum())
+    counts["Purple"] = int((chromatic_mask & ((H > 140) & (H <= 160) & (S >= 90))).sum())
 
     # Achromatic / Neutral classification by Value & Saturation
-    counts["White"] = int((achromatic_mask & (V >= 185)).sum())
-    counts["Silver"] = int((achromatic_mask & (V >= 120) & (V < 185) & (S <= 40)).sum())
-    counts["Beige"] = int((achromatic_mask & (V >= 140) & (S > 40) & (H >= 15) & (H <= 40)).sum())
+    counts["White"] = int((achromatic_mask & (V >= 190)).sum())
+    counts["Silver"] = int((achromatic_mask & (V >= 130) & (V < 190) & (S <= 35)).sum())
+    counts["Beige"] = int((achromatic_mask & (V >= 140) & (S > 35) & (H >= 15) & (H <= 40)).sum())
     counts["Tan"] = int((achromatic_mask & (V >= 90) & (V < 140) & (S > 35) & (H >= 10) & (H <= 40)).sum())
-    counts["Grey"] = int((achromatic_mask & (V >= 60) & (V < 120) & (S <= 40)).sum())
+    counts["Grey"] = int((achromatic_mask & (V >= 60) & (V < 130) & (S <= 35)).sum())
     counts["Black"] = int((achromatic_mask & (V < 60)).sum())
 
     total_chromatic = sum(counts[c] for c in ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"])
 
-    if total_chromatic >= total_pixels * 0.20:
+    # Require at least 35% chromatic pixels to consider the car a vibrant color
+    if total_chromatic >= total_pixels * 0.35:
         chromatic_colors = ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"]
         best_color = max(chromatic_colors, key=lambda c: counts[c])
         conf = counts[best_color] / max(total_chromatic, 1)
@@ -133,6 +134,8 @@ class VehicleClassifier:
 
     Usage:
         clf = VehicleClassifier(config)
+        color_probs = clf.predict_color_probs(crop_bgr)
+        type_probs  = clf.predict_type_probs(crop_bgr)
         color, color_conf = clf.predict_color(crop_bgr)
         vtype, type_conf  = clf.predict_type(crop_bgr)
     """
@@ -141,10 +144,9 @@ class VehicleClassifier:
         self.cfg_clf = config.get("classification", {})
         self.cfg_paths = config.get("paths", {})
         self.input_size = self.cfg_clf.get("input_size", 224)
-        self.conf_cutoff = self.cfg_clf.get("confidence_cutoff", 0.40)
+        self.conf_cutoff = self.cfg_clf.get("confidence_cutoff", 0.35)
 
         # Default class lists — must EXACTLY match the JSON files in alphabetical order
-        # (torchvision ImageFolder sorts class folders alphabetically)
         self.color_classes = [
             "Beige", "Black", "Blue", "Brown", "Gold", "Green", "Grey",
             "Orange", "Pink", "Purple", "Red", "Silver", "Tan", "White", "Yellow",
@@ -190,82 +192,84 @@ class VehicleClassifier:
             "type",
         )
 
-    # ── Public methods ──────────────────────────────────────────────────
+    # ── Probability distribution API (for continuous EMA smoothing) ─────
 
-    def predict_color(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
-        """
-        Returns (color_label, confidence).
-        Ensembles neural classifier with physical HSV body panel analyzer.
-        """
+    def predict_color_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
+        """Return a 1D probability distribution over color_classes."""
+        n_classes = len(self.color_classes)
         if crop_bgr is None or crop_bgr.size == 0:
-            return "Unknown", 0.0
-
-        hsv_color, hsv_conf = _hsv_color_fallback(crop_bgr)
+            return np.ones(n_classes, dtype=np.float32) / n_classes
 
         if self.color_model is not None:
-            nn_color, nn_conf = self._nn_predict(crop_bgr, self.color_model, self.color_classes)
-            if nn_color == "Gray":
-                nn_color = "Grey"
+            return self._nn_predict_probs(crop_bgr, self.color_model)
 
-            # If neural model is highly confident (>= 0.60), trust neural model prediction
-            if nn_conf >= 0.60:
-                return nn_color, nn_conf
+        # Fallback to HSV histogram distribution
+        hsv_color, hsv_conf = _hsv_color_fallback(crop_bgr)
+        probs = np.ones(n_classes, dtype=np.float32) * ((1.0 - hsv_conf) / max(n_classes - 1, 1))
+        if hsv_color in self.color_classes:
+            probs[self.color_classes.index(hsv_color)] = hsv_conf
+        return probs
 
-            # If physical HSV body panel analyzer has strong color (>= 0.25), use physical color
-            if hsv_conf >= 0.25:
-                return hsv_color, hsv_conf
-
-            return nn_color if nn_color != "Unknown" else hsv_color, max(nn_conf, hsv_conf)
-
-        return hsv_color, hsv_conf
-
-    def predict_type(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
-        """
-        Returns (type_label, confidence).
-        Uses neural model if available, else geometric aspect-ratio fallback.
-        """
+    def predict_type_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
+        """Return a 1D probability distribution over type_classes."""
+        n_classes = len(self.type_classes)
         if crop_bgr is None or crop_bgr.size == 0:
-            return "Unknown", 0.0
+            return np.ones(n_classes, dtype=np.float32) / n_classes
 
         if self.type_model is not None:
-            return self._nn_predict(crop_bgr, self.type_model, self.type_classes)
+            return self._nn_predict_probs(crop_bgr, self.type_model)
 
-        # Fallback: Aspect ratio geometric profile
+        # Fallback to aspect ratio geometric distribution
+        probs = np.ones(n_classes, dtype=np.float32) * (0.20 / max(n_classes - 1, 1))
         h, w = crop_bgr.shape[:2]
-        if h <= 0 or w <= 0:
-            return "Unknown", 0.0
+        if h > 0 and w > 0:
+            ar = w / float(h)
+            if ar < 1.10 and "SUV" in self.type_classes:
+                probs[self.type_classes.index("SUV")] = 0.80
+            elif 1.10 <= ar < 1.25 and "Hatchback" in self.type_classes:
+                probs[self.type_classes.index("Hatchback")] = 0.80
+            elif 1.25 <= ar < 1.45 and "Sedan" in self.type_classes:
+                probs[self.type_classes.index("Sedan")] = 0.80
+            elif 1.45 <= ar < 1.68 and "Coupe" in self.type_classes:
+                probs[self.type_classes.index("Coupe")] = 0.80
+            elif "Truck" in self.type_classes:
+                probs[self.type_classes.index("Truck")] = 0.80
+        return probs / np.sum(probs)
 
-        ar = w / float(h)   # width / height ratio
-        if ar < 1.08:
-            return "SUV", 0.75
-        elif 1.08 <= ar < 1.24:
-            return "Hatchback", 0.70
-        elif 1.24 <= ar < 1.44:
-            return "Sedan", 0.78
-        elif 1.44 <= ar < 1.68:
-            return "Coupe", 0.72
-        else:
-            return "Truck", 0.80
+    # ── Single-frame prediction API ─────────────────────────────────────
+
+    def predict_color(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
+        """Returns (color_label, confidence)."""
+        probs = self.predict_color_probs(crop_bgr)
+        idx = int(np.argmax(probs))
+        conf = float(probs[idx])
+        label = self.color_classes[idx] if conf >= self.conf_cutoff else "Unknown"
+        return label, round(conf, 3)
+
+    def predict_type(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
+        """Returns (type_label, confidence)."""
+        probs = self.predict_type_probs(crop_bgr)
+        idx = int(np.argmax(probs))
+        conf = float(probs[idx])
+        label = self.type_classes[idx] if conf >= self.conf_cutoff else "Unknown"
+        return label, round(conf, 3)
 
     # ── Internal helpers ────────────────────────────────────────────────
 
     @torch.no_grad()
-    def _nn_predict(
+    def _nn_predict_probs(
         self,
         crop_bgr: np.ndarray,
         model: nn.Module,
-        classes: list,
-    ) -> Tuple[str, float]:
-        """Run a single crop through a MobileNetV3 model."""
+    ) -> np.ndarray:
+        """Run a BGR crop through a MobileNetV3 model and return softmax probability vector."""
+        # Convert BGR to RGB for ImageNet-trained models
         img_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(img_rgb)
         tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
         logits = model(tensor)
         probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
-        idx = int(np.argmax(probs))
-        conf = float(probs[idx])
-        label = classes[idx] if conf >= self.conf_cutoff else "Unknown"
-        return label, round(conf, 3)
+        return probs
 
     def _load_model(
         self,

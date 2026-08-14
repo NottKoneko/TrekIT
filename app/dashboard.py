@@ -174,9 +174,9 @@ def process_video(
             out_h = out_h if out_h % 2 == 0 else out_h - 1
             logger.info(f"Downscaling output {width}×{height} → {out_w}×{out_h}")
 
-        # ── Frame stride: stride=2 processes every 2nd frame (optimal for RTX 4080)
-        stride = 2 if fps >= 25 else 1
-        output_fps = fps / stride
+        # ── Frame stride: stride=1 processes every frame for seamless Kalman tracking
+        stride = 1
+        output_fps = fps
 
         # ── H.264 video writer (stream directly via imageio_ffmpeg) ───────
         tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)

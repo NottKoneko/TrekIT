@@ -107,8 +107,17 @@ class VehicleDetector:
 
         self._frame_count = 0
         # track_id → last frame plate detection ran
+        self._frame_count = 0
+        # track_id → last frame plate detection ran
         self._plate_last_checked: dict = {}
-        self.plate_check_every: int = self.cfg.get("plate_check_every_n", 5)
+        self.plate_check_every: int = self.cfg.get("plate_check_every_n", 1)
+
+        # Resolve custom tracker YAML (bytetrack_custom.yaml with 60-frame buffer)
+        custom_tracker = Path("bytetrack_custom.yaml")
+        if custom_tracker.exists():
+            self.tracker_name = str(custom_tracker.resolve())
+        else:
+            self.tracker_name = self.track_cfg.get("tracker", "bytetrack.yaml")
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -132,14 +141,15 @@ class VehicleDetector:
         else:
             infer_frame = frame
 
-        # Run tracker on (possibly downscaled) frame
+        # Run tracker with low association floor (0.10) so ByteTrack can maintain
+        # Kalman tracks across momentary confidence dips without creating new IDs.
         results = self.model.track(
             infer_frame,
-            conf=self.conf_thresh,
+            conf=0.10,
             iou=self.iou_thresh,
             imgsz=self.input_size,
             device=self.device,
-            tracker="bytetrack.yaml",
+            tracker=self.tracker_name,
             persist=True,
             verbose=False,
         )
@@ -153,8 +163,12 @@ class VehicleDetector:
             if cls_id not in self.vehicle_class_ids:
                 continue
 
-            track_id = int(boxes.id[i].cpu()) if boxes.id is not None else -1
             conf = float(boxes.conf[i].cpu())
+            # Filter output boxes with primary confidence threshold
+            if conf < self.conf_thresh:
+                continue
+
+            track_id = int(boxes.id[i].cpu()) if boxes.id is not None else -1
             x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
 
             # Scale bboxes back to original frame coordinates
@@ -216,8 +230,8 @@ class VehicleDetector:
     ) -> List[Detection]:
         """
         Detect license plates within the cropped vehicle region.
-        Uses `self.plate_model` (trained YOLO) if available. If no plate detected,
-        falls back to OpenCV ANPR morphological contour locator.
+        Uses `self.plate_model` with resolution upscaling and low confidence floor (0.15).
+        Falls back to OpenCV ANPR morphological gradient contour locator.
         """
         x1, y1, x2, y2 = vehicle_bbox
         h, w = frame.shape[:2]
@@ -231,11 +245,24 @@ class VehicleDetector:
         # ── 1. If custom trained plate model exists, run it ─────────────────
         if self.plate_model is not None:
             crop = frame[y1:y2, x1:x2]
-            try:
-                # Use conf=0.25 to reduce false positives on side reflectors
-                results = self.plate_model(
+            
+            # Upscale small vehicle crops so license plate details aren't lost
+            crop_scale = 1.0
+            if vw < 320 or vh < 200:
+                crop_scale = min(320.0 / max(vw, 1), 200.0 / max(vh, 1))
+                crop_infer = cv2.resize(
                     crop,
-                    conf=0.25,
+                    (int(vw * crop_scale), int(vh * crop_scale)),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+            else:
+                crop_infer = crop
+
+            try:
+                # Use conf=0.15 to catch small / shadowed / distant plates
+                results = self.plate_model(
+                    crop_infer,
+                    conf=0.15,
                     iou=self.iou_thresh,
                     device=self.device,
                     verbose=False,
@@ -247,11 +274,16 @@ class VehicleDetector:
                         conf = float(boxes.conf[i].cpu())
                         px1, py1, px2, py2 = boxes.xyxy[i].cpu().numpy().astype(int)
 
-                        # Add 12% padding around plate box so character edges aren't clipped
+                        # Scale back if upscaled
+                        if crop_scale != 1.0:
+                            inv = 1.0 / crop_scale
+                            px1, py1, px2, py2 = int(px1 * inv), int(py1 * inv), int(px2 * inv), int(py2 * inv)
+
+                        # Add 15% padding around plate box so character edges aren't clipped
                         pw = px2 - px1
                         ph = py2 - py1
-                        pad_w = int(pw * 0.12)
-                        pad_h = int(ph * 0.12)
+                        pad_w = int(pw * 0.15)
+                        pad_h = int(ph * 0.15)
                         px1 = max(0, px1 - pad_w)
                         py1 = max(0, py1 - pad_h)
                         px2 = min(vw, px2 + pad_w)

@@ -151,14 +151,30 @@ def crop_bbox(
     frame: np.ndarray,
     bbox: Tuple[int, int, int, int],
     padding: int = 0,
+    padding_ratio: float = 0.0,
 ) -> Optional[np.ndarray]:
-    """Return a cropped region from frame, with optional padding."""
+    """Return a cropped region from frame, with optional absolute padding or relative padding_ratio."""
     h, w = frame.shape[:2]
     x1, y1, x2, y2 = bbox
-    x1 = max(0, x1 - padding)
-    y1 = max(0, y1 - padding)
-    x2 = min(w, x2 + padding)
-    y2 = min(h, y2 + padding)
+    if padding_ratio > 0.0:
+        bw = x2 - x1
+        bh = y2 - y1
+        pad_x = int(bw * padding_ratio)
+        pad_y = int(bh * padding_ratio)
+        x1 = max(0, x1 - pad_x)
+        y1 = max(0, y1 - pad_y)
+        x2 = min(w, x2 + pad_x)
+        y2 = min(h, y2 + pad_y)
+    elif padding > 0:
+        x1 = max(0, x1 - padding)
+        y1 = max(0, y1 - padding)
+        x2 = min(w, x2 + padding)
+        y2 = min(h, y2 + padding)
+    else:
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
     if x2 <= x1 or y2 <= y1:
         return None
     return frame[y1:y2, x1:x2].copy()
