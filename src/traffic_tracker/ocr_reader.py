@@ -85,7 +85,15 @@ def normalize_plate_format(text: str) -> str:
         if chars[i] in DIGIT_MAP:
             chars[i] = DIGIT_MAP[chars[i]]
 
-    return "".join(chars)
+def estimate_sharpness(img_bgr: np.ndarray) -> float:
+    """
+    Computes Laplacian variance to estimate image sharpness / motion blur.
+    Sharp plate crops return > 50.0; heavily motion-blurred or defocused crops return < 20.0.
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if len(img_bgr.shape) == 3 else img_bgr
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
 class PlateOCR:

@@ -87,15 +87,16 @@ class VehicleDetector:
             logger.warning("CUDA requested for detector but not available. Falling back to CPU.")
             dev_str = "cpu"
         self.device = dev_str
+        self.use_fp16 = self.cfg.get("fp16", True) and (self.device == "cuda" or "cuda" in str(self.device))
         self.conf_thresh = self.cfg.get("confidence_threshold", 0.45)
         self.iou_thresh = self.cfg.get("nms_iou_threshold", 0.45)
         self.input_size = self.cfg.get("input_size", 640)
         self.vehicle_class_ids = set(self.cfg.get("vehicle_class_ids", [2, 3, 5, 7]))
         self.plate_class_id = self.cfg.get("plate_class_id", 0)
 
-        # ── Load vehicle detector (yolov8n.pt for COCO vehicle classes) ────
-        coco_weights = weights_path or self._resolve_weights("models/yolov8n_pretrained.pt")
-        logger.info(f"Loading vehicle detector from: {coco_weights}")
+        # ── Load vehicle detector (yolo11 / yolov8 for COCO vehicle classes) ────
+        coco_weights = weights_path or self._resolve_weights("models/yolo11s.pt", "models/yolo11n.pt", "models/yolov8n_pretrained.pt")
+        logger.info(f"Loading vehicle detector from: {coco_weights} (FP16: {self.use_fp16})")
         self.model = YOLO(coco_weights)
         self.model.to(self.device)
 
@@ -389,25 +390,27 @@ class VehicleDetector:
         # ── 3. No plate detected — return empty list ────────────────────────
         return []
 
-    def _resolve_weights(self, weights_path: str) -> str:
+    def _resolve_weights(self, *candidates: str) -> str:
         """
-        Return a valid weights path, downloading YOLOv8n pretrained as fallback.
+        Return the first existing weights path from candidates, downloading fallback if none exist.
         """
-        if weights_path and Path(weights_path).exists():
-            return weights_path
+        for c in candidates:
+            if c and Path(c).exists():
+                return c
 
         fallback = Path("models/yolov8n_pretrained.pt")
         if fallback.exists():
-            logger.info("Using cached pretrained YOLOv8n weights.")
+            logger.info("Using cached pretrained YOLO weights.")
             return str(fallback)
 
+        fallback_url = self.cfg.get("yolo_fallback_url", self.FALLBACK_URL)
         logger.warning(
-            f"Custom weights not found at '{weights_path}'. "
-            "Downloading pretrained YOLOv8n from Ultralytics..."
+            f"Weights not found in candidates {candidates}. "
+            "Downloading pretrained YOLO from Ultralytics..."
         )
         fallback.parent.mkdir(parents=True, exist_ok=True)
         try:
-            resp = requests.get(self.FALLBACK_URL, timeout=120, stream=True)
+            resp = requests.get(fallback_url, timeout=120, stream=True)
             resp.raise_for_status()
             with open(fallback, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=8192):

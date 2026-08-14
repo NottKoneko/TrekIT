@@ -164,6 +164,55 @@ def download_stanford_cars_subset() -> str:
     return str(STANFORD_OUTPUT_DIR)
 
 
+# ── 3. MIO-TCD Real CCTV Traffic Camera Dataset (HuggingFace / Kaggle) ─────
+MIOTCD_OUTPUT_DIR = BASE_DIR / "miotcd_cctv_subset"
+
+def download_miotcd_cctv_subset() -> str:
+    """
+    Download a subset of real CCTV traffic camera images from MIO-TCD for
+    robust high-angle vehicle body type classification.
+    """
+    try:
+        from datasets import load_dataset
+        from PIL import Image as PILImage
+        from tqdm import tqdm
+    except ImportError:
+        logger.warning("datasets not installed. Skipping MIO-TCD streaming.")
+        return ""
+
+    MIOTCD_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Checking MIO-TCD CCTV Traffic dataset → {MIOTCD_OUTPUT_DIR}...")
+    try:
+        ds = load_dataset("jonassj/MIO-TCD-classification", split="train", streaming=True)
+        counts = {}
+        max_per_class = 200
+        saved = 0
+        pbar = tqdm(desc="Saving MIO-TCD CCTV subset", unit="img")
+        for sample in ds:
+            lbl = str(sample.get("label", sample.get("class", "unknown")))
+            img = sample.get("image")
+            if img is None:
+                continue
+            counts[lbl] = counts.get(lbl, 0)
+            if counts[lbl] >= max_per_class:
+                continue
+            d = MIOTCD_OUTPUT_DIR / lbl
+            d.mkdir(parents=True, exist_ok=True)
+            p = d / f"{saved:06d}.jpg"
+            img.convert("RGB").save(p, "JPEG", quality=90)
+            counts[lbl] += 1
+            saved += 1
+            pbar.update(1)
+            if saved >= max_per_class * 7:
+                break
+        pbar.close()
+        logger.info(f"MIO-TCD CCTV subset ready: {saved} real-world surveillance crops.")
+        return str(MIOTCD_OUTPUT_DIR)
+    except Exception as e:
+        logger.warning(f"Could not stream MIO-TCD (fallback to Stanford Cars): {e}")
+        return ""
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -187,6 +236,13 @@ def main():
         results["stanford_cars_subset"] = download_stanford_cars_subset()
     except Exception as e:
         logger.error(f"Stanford Cars subset failed: {e}")
+
+    try:
+        cctv_path = download_miotcd_cctv_subset()
+        if cctv_path:
+            results["miotcd_cctv_subset"] = cctv_path
+    except Exception as e:
+        logger.warning(f"MIO-TCD CCTV dataset download skipped: {e}")
 
     logger.info("\n" + "=" * 60)
     logger.info("Download Summary:")

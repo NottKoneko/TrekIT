@@ -8,32 +8,33 @@ paths:
   data_dir: "data"
   logs_dir: "logs"
 
-  # Trained weights (placed here after downloading from Colab)
+  # Trained weights (placed here after training on your RTX 3060 PC)
+  vehicle_attributes_weights: "models/vehicle_attributes.pt"  # Unified Multi-Task (Color + Type)
   yolo_weights: "models/plate_detector.pt"
   color_weights: "models/color_classifier.pt"
   type_weights:  "models/type_classifier.pt"
 
   # ONNX variants (optional, faster on CPU)
+  vehicle_attributes_onnx: "models/vehicle_attributes.onnx"
   yolo_onnx:   "models/plate_detector.onnx"
   color_onnx:  "models/color_classifier.onnx"
   type_onnx:   "models/type_classifier.onnx"
 
 # ── Pretrained fallback auto-download ───────────────────────
 pretrained:
-  # YOLOv8n pretrained on COCO — used if yolo_weights not found
-  yolo_fallback_url: "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt"
-  # MobileNetV3-Small from torchvision — used if color/type weights not found
+  # YOLO11s pretrained on COCO — used if custom weights not found
+  yolo_fallback_url: "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt"
+  # MobileNetV3-Large from torchvision — used if classifier weights not found
   mobilenet_pretrained: true
 
 # ── Detection ───────────────────────────────────────────────
 detection:
-  confidence_threshold: 0.20      # Lowered from 0.35 to catch small/distant license plates
+  confidence_threshold: 0.20      # Lowered to catch small/distant license plates
   nms_iou_threshold: 0.45         # Non-max suppression IoU
   input_size: 640                 # 640px / 1024px input resolution
-  device: "cuda"                  # RTX 4080 CUDA GPU
+  device: "cuda"                  # CUDA GPU (e.g. RTX 3060 12GB) or CPU
   plate_check_every_n: 1          # Check plate on every frame per track
-  engine: "tensorrt"              # "pt" or "tensorrt"
-  half_precision: true            # FP16 acceleration for RTX GPUs
+  fp16: true                      # Native FP16 Half Precision acceleration on CUDA Tensor Cores
 
   # Class IDs in the custom YOLO model
   vehicle_class_ids: [2, 3, 5, 7]   # COCO: car, motorcycle, bus, truck

@@ -118,7 +118,43 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
     return best_color, round(conf, 3)
 
 
-# ── MobileNetV3 Builders ───────────────────────────────────────────────────
+# ── Unified Multi-Task Network ────────────────────────────────────────────
+class VehicleAttributeNet(nn.Module):
+    """
+    Unified Multi-Task Network for vehicle color (15 classes) and body type (7 classes).
+    Uses a shared MobileNetV3-Large backbone and two specialized classification heads.
+    """
+    def __init__(self, n_colors: int = 15, n_types: int = 7, pretrained: bool = False):
+        super().__init__()
+        weights = models.MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
+        base = models.mobilenet_v3_large(weights=weights)
+        self.features = base.features
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        in_feat = 960  # MobileNetV3-Large output feature channels
+
+        self.color_head = nn.Sequential(
+            nn.Linear(in_feat, 256),
+            nn.Hardswish(),
+            nn.Dropout(0.2),
+            nn.Linear(256, n_colors),
+        )
+        self.type_head = nn.Sequential(
+            nn.Linear(in_feat, 256),
+            nn.Hardswish(),
+            nn.Dropout(0.2),
+            nn.Linear(256, n_types),
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        feat = self.features(x)
+        feat = self.pool(feat)
+        feat = torch.flatten(feat, 1)
+        color_logits = self.color_head(feat)
+        type_logits = self.type_head(feat)
+        return color_logits, type_logits
+
+
+# ── MobileNetV3 Builders (Single-Task Legacy) ──────────────────────────────
 def _build_mobilenet_large(num_classes: int) -> nn.Module:
     """Build a MobileNetV3-Large model."""
     base = models.mobilenet_v3_large(
@@ -143,13 +179,13 @@ def _build_mobilenet_small(num_classes: int) -> nn.Module:
 class VehicleClassifier:
     """
     Classifies vehicle color (15 classes) and body type (7 classes).
+    Supports unified multi-task network (VehicleAttributeNet) or legacy dual models.
 
     Usage:
         clf = VehicleClassifier(config)
+        color_probs, type_probs = clf.predict_attributes_probs(crop_bgr)
         color_probs = clf.predict_color_probs(crop_bgr)
         type_probs  = clf.predict_type_probs(crop_bgr)
-        color, color_conf = clf.predict_color(crop_bgr)
-        vtype, type_conf  = clf.predict_type(crop_bgr)
     """
 
     def __init__(self, config: dict):
@@ -193,18 +229,64 @@ class VehicleClassifier:
             logger.warning("CUDA requested for classifier but not available. Falling back to CPU.")
             dev_str = "cpu"
         self.device = torch.device(dev_str)
+        self.use_fp16 = (self.device.type == "cuda")
         self.transform = _make_transform(self.input_size)
 
-        self.color_model: Optional[nn.Module] = self._load_model(
-            self.cfg_paths.get("color_weights", ""),
-            len(self.color_classes),
-            "color",
-        )
-        self.type_model: Optional[nn.Module] = self._load_model(
-            self.cfg_paths.get("type_weights", ""),
-            len(self.type_classes),
-            "type",
-        )
+        # 1. Attempt to load unified multi-task attribute network
+        multi_task_path = self.cfg_paths.get("vehicle_attributes_weights", str(models_dir / "vehicle_attributes.pt"))
+        self.multitask_model: Optional[VehicleAttributeNet] = self._load_multitask_model(multi_task_path)
+
+        # 2. If no multi-task model, load legacy dual models
+        self.color_model: Optional[nn.Module] = None
+        self.type_model: Optional[nn.Module] = None
+        if self.multitask_model is None:
+            self.color_model = self._load_model(
+                self.cfg_paths.get("color_weights", ""),
+                len(self.color_classes),
+                "color",
+            )
+            self.type_model = self._load_model(
+                self.cfg_paths.get("type_weights", ""),
+                len(self.type_classes),
+                "type",
+            )
+
+    # ── Probability distribution API (for continuous EMA smoothing) ─────
+
+    @torch.no_grad()
+    def predict_attributes_probs(self, crop_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Run a single forward pass through the unified multi-task network.
+        Returns (color_probs, type_probs) simultaneously.
+        """
+        n_c = len(self.color_classes)
+        n_t = len(self.type_classes)
+        if crop_bgr is None or crop_bgr.size == 0:
+            return (
+                np.ones(n_c, dtype=np.float32) / max(n_c, 1),
+                np.ones(n_t, dtype=np.float32) / max(n_t, 1),
+            )
+
+        if self.multitask_model is not None:
+            pil_img = preprocess_crop(crop_bgr)
+            if pil_img is None:
+                return (
+                    np.ones(n_c, dtype=np.float32) / max(n_c, 1),
+                    np.ones(n_t, dtype=np.float32) / max(n_t, 1),
+                )
+            tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
+            if self.use_fp16:
+                with torch.cuda.amp.autocast():
+                    c_logits, t_logits = self.multitask_model(tensor)
+            else:
+                c_logits, t_logits = self.multitask_model(tensor)
+
+            c_probs = torch.softmax(c_logits.float(), dim=1)[0].cpu().numpy()
+            t_probs = torch.softmax(t_logits.float(), dim=1)[0].cpu().numpy()
+            return c_probs, t_probs
+
+        # Fallback to separate models or heuristics
+        return self.predict_color_probs(crop_bgr), self.predict_type_probs(crop_bgr)
 
     # ── Probability distribution API (for continuous EMA smoothing) ─────
 
@@ -298,6 +380,35 @@ class VehicleClassifier:
                 padded[:len(probs)] = probs
                 probs = padded
         return probs
+
+    def _load_multitask_model(self, weights_path: str) -> Optional[VehicleAttributeNet]:
+        """Load unified Multi-Task VehicleAttributeNet weights."""
+        if not weights_path or not Path(weights_path).exists():
+            return None
+
+        try:
+            state = torch.load(weights_path, map_location=self.device, weights_only=False)
+            cleaned_state = {}
+            for k, v in state.items():
+                new_key = k[4:] if k.startswith("net.") else k
+                cleaned_state[new_key] = v
+
+            n_c = len(self.color_classes)
+            n_t = len(self.type_classes)
+            if "color_head.3.weight" in cleaned_state:
+                n_c = cleaned_state["color_head.3.weight"].shape[0]
+            if "type_head.3.weight" in cleaned_state:
+                n_t = cleaned_state["type_head.3.weight"].shape[0]
+
+            model = VehicleAttributeNet(n_colors=n_c, n_types=n_t, pretrained=False)
+            model.load_state_dict(cleaned_state)
+            model.to(self.device)
+            model.eval()
+            logger.info(f"Loaded unified Multi-Task VehicleAttributeNet ({n_c} colors, {n_t} types) from: {weights_path}")
+            return model
+        except Exception as e:
+            logger.warning(f"Could not load multi-task attribute weights from {weights_path}: {e}")
+            return None
 
     def _load_model(
         self,

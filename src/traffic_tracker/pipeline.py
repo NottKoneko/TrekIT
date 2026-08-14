@@ -29,7 +29,7 @@ from logging.handlers import RotatingFileHandler
 
 from .classifier import VehicleClassifier
 from .detector import VehicleDetection, VehicleDetector
-from .ocr_reader import PlateOCR
+from .ocr_reader import PlateOCR, estimate_sharpness
 from .utils import (
     FPSCounter,
     VehicleRecord,
@@ -232,29 +232,44 @@ class TrafficPipeline:
 
             # ── Classification (Continuous EMA probability smoothing) ───────
             if self._frame_idx % self.classify_every_n == 0:
-                if steel_crop is not None:
-                    p_color = self.classifier.predict_color_probs(steel_crop)
+                if self.classifier.multitask_model is not None and type_crop is not None:
+                    # Single forward pass for both color and type
+                    p_color, p_type = self.classifier.predict_attributes_probs(type_crop)
                     alpha_c = self.ema_alpha if not is_edge else 0.05
                     if state.color_probs is None:
                         state.color_probs = p_color
                     else:
-                        state.color_probs = (
-                            alpha_c * p_color + (1.0 - alpha_c) * state.color_probs
-                        )
-                    c_conf = float(np.max(state.color_probs))
-                    if c_conf > state._best_conf:
-                        state.best_crop = steel_crop
-                        state._best_conf = c_conf
+                        state.color_probs = alpha_c * p_color + (1.0 - alpha_c) * state.color_probs
 
-                # Only update body type when the vehicle is not heavily cut off at screen borders
-                if type_crop is not None and not is_edge:
-                    p_type = self.classifier.predict_type_probs(type_crop)
-                    if state.type_probs is None:
-                        state.type_probs = p_type
-                    else:
-                        state.type_probs = (
-                            self.ema_alpha * p_type + (1.0 - self.ema_alpha) * state.type_probs
-                        )
+                    if not is_edge:
+                        if state.type_probs is None:
+                            state.type_probs = p_type
+                        else:
+                            state.type_probs = self.ema_alpha * p_type + (1.0 - self.ema_alpha) * state.type_probs
+                else:
+                    if steel_crop is not None:
+                        p_color = self.classifier.predict_color_probs(steel_crop)
+                        alpha_c = self.ema_alpha if not is_edge else 0.05
+                        if state.color_probs is None:
+                            state.color_probs = p_color
+                        else:
+                            state.color_probs = (
+                                alpha_c * p_color + (1.0 - alpha_c) * state.color_probs
+                            )
+                        c_conf = float(np.max(state.color_probs))
+                        if c_conf > state._best_conf:
+                            state.best_crop = steel_crop
+                            state._best_conf = c_conf
+
+                    # Only update body type when the vehicle is not heavily cut off at screen borders
+                    if type_crop is not None and not is_edge:
+                        p_type = self.classifier.predict_type_probs(type_crop)
+                        if state.type_probs is None:
+                            state.type_probs = p_type
+                        else:
+                            state.type_probs = (
+                                self.ema_alpha * p_type + (1.0 - self.ema_alpha) * state.type_probs
+                            )
 
             # ── OCR on plate sub-regions (runs until a confident plate is read) ─────
             top_plate_text = (
@@ -282,13 +297,19 @@ class TrafficPipeline:
 
                         plate_crop = crop_bbox(frame, plate_det.bbox)
                         if plate_crop is not None:
+                            # Sharpness Gate: Discard heavily motion-blurred plate crops (< 15.0)
+                            sharpness = estimate_sharpness(plate_crop)
+                            if sharpness < 15.0:
+                                continue
+
                             text, conf = self.ocr.read(plate_crop)
                             state.ocr_attempts += 1
                             if text and len(text) >= 5:
-                                # Bonus weight for matching standard plate regex patterns
+                                # Bonus weight for matching standard plate regex patterns and sharp focus
                                 is_valid_pattern = self.ocr._matches_plate_pattern(text)
                                 mult = 2.0 if is_valid_pattern else 0.5
-                                state.plate_votes[text] += (conf ** 3) * mult
+                                sharpness_bonus = min(max(sharpness / 50.0, 0.5), 2.0)
+                                state.plate_votes[text] += (conf ** 3) * mult * sharpness_bonus
                                 # Do NOT break — evaluate all plate candidates in the frame
 
             # ── Draw plate box on annotated frame (highest-confidence candidate) ──
