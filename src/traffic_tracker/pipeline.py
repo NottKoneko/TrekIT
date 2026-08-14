@@ -337,6 +337,8 @@ class TrafficPipeline:
             color_lbl, color_conf = ("Unknown", 0.0)
             type_lbl, type_conf   = ("Unknown", 0.0)
             plate_text = ""
+            plate_conf = 0.0
+            best_plate_det = None
 
             if steel_crop is not None:
                 color_lbl, color_conf = self.classifier.predict_color(steel_crop)
@@ -349,7 +351,13 @@ class TrafficPipeline:
                     text, conf = self.ocr.read(plate_crop)
                     if text and len(text) >= 2:
                         plate_text = text
+                        plate_conf = conf
+                        best_plate_det = plate_det
                         break
+
+            # Draw license plate box overlay directly on the plate
+            if best_plate_det is not None:
+                draw_plate_overlay(annotated, best_plate_det.bbox, plate_text)
 
             draw_vehicle_overlay(
                 annotated,
@@ -363,11 +371,11 @@ class TrafficPipeline:
             records.append(VehicleRecord(
                 track_id=i,
                 plate_text=plate_text,
-                plate_conf=0.0,
+                plate_conf=round(plate_conf, 3),
                 color=color_lbl,
-                color_conf=color_conf,
+                color_conf=round(color_conf, 3),
                 vehicle_type=type_lbl,
-                type_conf=type_conf,
+                type_conf=round(type_conf, 3),
                 frame_first_seen=0,
                 frame_last_seen=0,
             ))
