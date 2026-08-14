@@ -31,6 +31,7 @@ def _get_reader(languages: List[str], use_gpu: bool):
     if _easyocr_reader is None:
         import sys
         import os
+        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
         os.environ["PYTHONIOENCODING"] = "utf-8"
         if hasattr(sys.stdout, "reconfigure"):
             try:

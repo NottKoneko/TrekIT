@@ -13,5 +13,9 @@ Usage:
     results = pipeline.process_frame(frame)
 """
 
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 __version__ = "1.0.0"
 __author__ = "Traffic Tracker AI"
+
