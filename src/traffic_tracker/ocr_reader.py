@@ -29,9 +29,22 @@ _easyocr_reader = None
 def _get_reader(languages: List[str], use_gpu: bool):
     global _easyocr_reader
     if _easyocr_reader is None:
+        import sys
+        import os
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+        if hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
+        if hasattr(sys.stderr, "reconfigure"):
+            try:
+                sys.stderr.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
         import easyocr
         logger.info(f"Initialising EasyOCR (languages={languages}, gpu={use_gpu})…")
-        _easyocr_reader = easyocr.Reader(languages, gpu=use_gpu)
+        _easyocr_reader = easyocr.Reader(languages, gpu=use_gpu, verbose=False)
     return _easyocr_reader
 
 
@@ -48,7 +61,7 @@ class PlateOCR:
         self.cfg = config.get("ocr", {})
         self.languages: List[str] = self.cfg.get("languages", ["en"])
         self.use_gpu: bool = self.cfg.get("gpu", False)
-        self.min_confidence: float = self.cfg.get("min_confidence", 0.4)
+        self.min_confidence: float = self.cfg.get("min_confidence", 0.15)
 
         pre = self.cfg.get("preprocessing", {})
         self.do_grayscale: bool = pre.get("grayscale", True)
@@ -63,7 +76,7 @@ class PlateOCR:
         self.do_deskew: bool = pre.get("deskew", True)
 
         self.regex_patterns: List[str] = self.cfg.get("regex_patterns", [
-            r"^[A-Z0-9]{4,8}$",
+            r"^[A-Z0-9]{2,12}$",
             r"^[A-Z]{1,3}[0-9]{1,4}[A-Z]{0,3}$",
         ])
         self.strip_chars: str = self.cfg.get(
@@ -81,10 +94,10 @@ class PlateOCR:
         if plate_crop_bgr is None or plate_crop_bgr.size == 0:
             return "", 0.0
 
-        # Up-scale tiny crops for better OCR accuracy
+        # Up-scale tiny crops so plate height is at least 90px for EasyOCR accuracy
         h, w = plate_crop_bgr.shape[:2]
-        if w < 120:
-            scale = 120 / max(w, 1)
+        if h < 90 or w < 220:
+            scale = max(90.0 / max(h, 1), 220.0 / max(w, 1))
             plate_crop_bgr = cv2.resize(
                 plate_crop_bgr,
                 (int(w * scale), int(h * scale)),

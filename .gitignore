@@ -30,3 +30,12 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+.gradio/
+
+# Generated files & images
+*.patch
+image.png
+notebooks/models/
+notebooks/runs/
+old/
+

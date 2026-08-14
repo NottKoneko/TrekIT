@@ -39,51 +39,70 @@ def _make_transform(input_size: int = 224) -> transforms.Compose:
 
 
 # ── Colour lookup (HSV-based fallback) ─────────────────────────────────────
-# (hue_low, hue_high, sat_min, val_min) — works in OpenCV HSV space
-_HSV_RANGES = {
-    "Red":    [(0, 10, 80, 60), (160, 180, 80, 60)],   # wraps around 0/180
-    "Orange": [(10, 25, 100, 80)],
-    "Yellow": [(25, 35, 100, 80)],
-    "Green":  [(35, 85, 60, 60)],
-    "Blue":   [(85, 130, 60, 60)],
-    "Purple": [(130, 160, 60, 60)],
-    "White":  [(0, 180, 0, 200)],
-    "Silver": [(0, 180, 0, 140)],
-    "Gray":   [(0, 180, 0, 80)],
-    "Black":  [(0, 180, 0, 0)],
-    "Brown":  [(10, 20, 60, 40)],
-}
-
 
 def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
-    """Estimate dominant colour from an HSV histogram. Returns (color, confidence)."""
-    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-    # Build per-pixel colour label map
-    votes: Counter = Counter()
-    mask_all = np.zeros(hsv.shape[:2], dtype=bool)
+    """Estimate dominant vehicle body colour from HSV analysis of central region."""
+    if crop_bgr is None or crop_bgr.size == 0:
+        return "Unknown", 0.0
 
-    ordered = [
-        "Black", "White", "Silver", "Gray",
-        "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Brown",
-    ]
-    for color in ordered:
-        ranges = _HSV_RANGES.get(color, [])
-        mask = np.zeros(hsv.shape[:2], dtype=bool)
-        for r in ranges:
-            h_lo, h_hi, s_min, v_min = r
-            m = (
-                (hsv[:, :, 0] >= h_lo) & (hsv[:, :, 0] <= h_hi) &
-                (hsv[:, :, 1] >= s_min) &
-                (hsv[:, :, 2] >= v_min)
-            ) & ~mask_all
-            mask |= m
-            mask_all |= m
-        votes[color] = int(mask.sum())
+    h, w = crop_bgr.shape[:2]
+    # Crop central region (avoid road, wheels, outer background shadows, windshields)
+    margin_h = int(h * 0.20)
+    margin_w = int(w * 0.20)
+    body_crop = crop_bgr[margin_h:max(margin_h + 1, h - margin_h), margin_w:max(margin_w + 1, w - margin_w)]
+    if body_crop.size == 0:
+        body_crop = crop_bgr
 
-    total = hsv.shape[0] * hsv.shape[1]
-    best_color, best_count = votes.most_common(1)[0]
-    confidence = best_count / max(total, 1)
-    return best_color, round(confidence, 3)
+    hsv = cv2.cvtColor(body_crop, cv2.COLOR_BGR2HSV)
+    H = hsv[:, :, 0]
+    S = hsv[:, :, 1]
+    V = hsv[:, :, 2]
+
+    total_pixels = body_crop.shape[0] * body_crop.shape[1]
+    if total_pixels == 0:
+        return "Unknown", 0.0
+
+    # True chromatic (vibrant color) vs achromatic (neutral) mask
+    chromatic_mask = (S >= 60) & (V >= 45)
+    achromatic_mask = ~chromatic_mask
+
+    counts = {
+        "Beige": 0, "Black": 0, "Blue": 0, "Brown": 0, "Gold": 0,
+        "Green": 0, "Grey": 0, "Orange": 0, "Pink": 0, "Purple": 0,
+        "Red": 0, "Silver": 0, "Tan": 0, "White": 0, "Yellow": 0,
+    }
+
+    # Chromatic classification by Hue & Value
+    counts["Red"] = int((chromatic_mask & (((H >= 0) & (H <= 10)) | ((H >= 165) & (H <= 180)))).sum())
+    counts["Pink"] = int((chromatic_mask & (H > 150) & (H < 165)).sum())
+    counts["Orange"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V >= 120))).sum())
+    counts["Brown"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V < 120) & (S > 80))).sum())
+    counts["Gold"] = int((chromatic_mask & ((H > 25) & (H <= 38) & (V >= 150) & (S < 150))).sum())
+    counts["Yellow"] = int((chromatic_mask & ((H > 25) & (H <= 38) & ((V < 150) | (S >= 150)))).sum())
+    counts["Green"] = int((chromatic_mask & ((H > 38) & (H <= 85))).sum())
+    counts["Blue"] = int((chromatic_mask & ((H > 85) & (H <= 135))).sum())
+    counts["Purple"] = int((chromatic_mask & ((H > 135) & (H <= 150))).sum())
+
+    # Achromatic / Neutral classification by Value & Saturation
+    counts["White"] = int((achromatic_mask & (V >= 185)).sum())
+    counts["Silver"] = int((achromatic_mask & (V >= 120) & (V < 185) & (S <= 40)).sum())
+    counts["Beige"] = int((achromatic_mask & (V >= 140) & (S > 40) & (H >= 15) & (H <= 40)).sum())
+    counts["Tan"] = int((achromatic_mask & (V >= 90) & (V < 140) & (S > 35) & (H >= 10) & (H <= 40)).sum())
+    counts["Grey"] = int((achromatic_mask & (V >= 60) & (V < 120) & (S <= 40)).sum())
+    counts["Black"] = int((achromatic_mask & (V < 60)).sum())
+
+    total_chromatic = sum(counts[c] for c in ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"])
+
+    if total_chromatic >= total_pixels * 0.20:
+        chromatic_colors = ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"]
+        best_color = max(chromatic_colors, key=lambda c: counts[c])
+        conf = counts[best_color] / max(total_chromatic, 1)
+    else:
+        neutral_colors = ["White", "Silver", "Beige", "Tan", "Grey", "Black"]
+        best_color = max(neutral_colors, key=lambda c: counts[c])
+        conf = counts[best_color] / max(total_pixels - total_chromatic, 1)
+
+    return best_color, round(conf, 3)
 
 
 # ── MobileNetV3 Builders ───────────────────────────────────────────────────
@@ -176,21 +195,34 @@ class VehicleClassifier:
     def predict_color(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         """
         Returns (color_label, confidence).
-        Uses neural model if available, else HSV-histogram fallback.
+        Ensembles neural classifier with physical HSV body panel analyzer.
         """
         if crop_bgr is None or crop_bgr.size == 0:
             return "Unknown", 0.0
 
-        if self.color_model is not None:
-            return self._nn_predict(crop_bgr, self.color_model, self.color_classes)
+        hsv_color, hsv_conf = _hsv_color_fallback(crop_bgr)
 
-        # Fallback: HSV histogram
-        return _hsv_color_fallback(crop_bgr)
+        if self.color_model is not None:
+            nn_color, nn_conf = self._nn_predict(crop_bgr, self.color_model, self.color_classes)
+            if nn_color == "Gray":
+                nn_color = "Grey"
+
+            # If neural model is highly confident (>= 0.60), trust neural model prediction
+            if nn_conf >= 0.60:
+                return nn_color, nn_conf
+
+            # If physical HSV body panel analyzer has strong color (>= 0.25), use physical color
+            if hsv_conf >= 0.25:
+                return hsv_color, hsv_conf
+
+            return nn_color if nn_color != "Unknown" else hsv_color, max(nn_conf, hsv_conf)
+
+        return hsv_color, hsv_conf
 
     def predict_type(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         """
         Returns (type_label, confidence).
-        Requires fine-tuned weights; returns 'Unknown' without them.
+        Uses neural model if available, else geometric aspect-ratio fallback.
         """
         if crop_bgr is None or crop_bgr.size == 0:
             return "Unknown", 0.0
@@ -198,7 +230,22 @@ class VehicleClassifier:
         if self.type_model is not None:
             return self._nn_predict(crop_bgr, self.type_model, self.type_classes)
 
-        return "Unknown", 0.0
+        # Fallback: Aspect ratio geometric profile
+        h, w = crop_bgr.shape[:2]
+        if h <= 0 or w <= 0:
+            return "Unknown", 0.0
+
+        ar = w / float(h)   # width / height ratio
+        if ar < 1.08:
+            return "SUV", 0.75
+        elif 1.08 <= ar < 1.24:
+            return "Hatchback", 0.70
+        elif 1.24 <= ar < 1.44:
+            return "Sedan", 0.78
+        elif 1.44 <= ar < 1.68:
+            return "Coupe", 0.72
+        else:
+            return "Truck", 0.80
 
     # ── Internal helpers ────────────────────────────────────────────────
 

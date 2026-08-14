@@ -217,7 +217,7 @@ class VehicleDetector:
         """
         Detect license plates within the cropped vehicle region.
         Uses `self.plate_model` (trained YOLO) if available. If no plate detected,
-        falls back to geometric bumper area heuristic.
+        falls back to OpenCV ANPR morphological contour locator.
         """
         x1, y1, x2, y2 = vehicle_bbox
         h, w = frame.shape[:2]
@@ -228,15 +228,14 @@ class VehicleDetector:
         if vh <= 10 or vw <= 10:
             return []
 
-        # ── 1. If custom trained plate model exists, use it ─────────────────
+        # ── 1. If custom trained plate model exists, run it ─────────────────
         if self.plate_model is not None:
             crop = frame[y1:y2, x1:x2]
             try:
-                # Use 0.20 conf threshold for plate detection (plates are small/distant)
-                plate_conf = min(self.conf_thresh, 0.20)
+                # Use conf=0.25 to reduce false positives on side reflectors
                 results = self.plate_model(
                     crop,
-                    conf=plate_conf,
+                    conf=0.25,
                     iou=self.iou_thresh,
                     device=self.device,
                     verbose=False,
@@ -247,6 +246,17 @@ class VehicleDetector:
                     for i, cls_id in enumerate(boxes.cls.cpu().numpy().astype(int)):
                         conf = float(boxes.conf[i].cpu())
                         px1, py1, px2, py2 = boxes.xyxy[i].cpu().numpy().astype(int)
+
+                        # Add 12% padding around plate box so character edges aren't clipped
+                        pw = px2 - px1
+                        ph = py2 - py1
+                        pad_w = int(pw * 0.12)
+                        pad_h = int(ph * 0.12)
+                        px1 = max(0, px1 - pad_w)
+                        py1 = max(0, py1 - pad_h)
+                        px2 = min(vw, px2 + pad_w)
+                        py2 = min(vh, py2 + pad_h)
+
                         abs_bbox = (x1 + px1, y1 + py1, x1 + px2, y1 + py2)
                         plates.append(
                             Detection(
@@ -263,10 +273,59 @@ class VehicleDetector:
             except Exception as e:
                 logger.warning(f"Plate detection failed: {e}")
 
-        # ── 2. No plate detected — return empty list ────────────────────────────
-        # Intentionally do NOT fall back to a geometric heuristic. A fake bumper-
-        # area box sends EasyOCR over tires, grilles, and shadows, producing
-        # hallucinated plate text. An empty list is always safer.
+        # ── 2. OpenCV ANPR Plate Contour Locator fallback ───────────────────
+        crop = frame[y1:y2, x1:x2]
+        try:
+            ymin = int(vh * 0.35)
+            crop_lower = crop[ymin:, :]
+            lh, lw = crop_lower.shape[:2]
+
+            if lh >= 15 and lw >= 30:
+                gray = cv2.cvtColor(crop_lower, cv2.COLOR_BGR2GRAY)
+                blur = cv2.GaussianBlur(gray, (5, 5), 0)
+                sobelx = cv2.Sobel(blur, cv2.CV_8U, 1, 0, ksize=3)
+                _, thresh = cv2.threshold(sobelx, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
+                closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+                contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                anpr_plates: List[Detection] = []
+
+                for cnt in contours:
+                    cx, cy, cw, ch = cv2.boundingRect(cnt)
+                    aspect_ratio = cw / float(max(ch, 1))
+                    area = cw * ch
+
+                    if 1.6 <= aspect_ratio <= 5.8 and 220 <= area <= (lw * lh * 0.45):
+                        abs_px1 = x1 + cx
+                        abs_py1 = y1 + ymin + cy
+                        abs_px2 = x1 + cx + cw
+                        abs_py2 = y1 + ymin + cy + ch
+
+                        pad_w = int(cw * 0.08)
+                        pad_h = int(ch * 0.08)
+                        abs_px1 = max(0, abs_px1 - pad_w)
+                        abs_py1 = max(0, abs_py1 - pad_h)
+                        abs_px2 = min(w, abs_px2 + pad_w)
+                        abs_py2 = min(h, abs_py2 + pad_h)
+
+                        anpr_plates.append(
+                            Detection(
+                                track_id=-1,
+                                class_id=0,
+                                label="license_plate",
+                                confidence=0.75,
+                                bbox=(abs_px1, abs_py1, abs_px2, abs_py2),
+                                is_plate=True,
+                            )
+                        )
+                if anpr_plates:
+                    return anpr_plates[:2]
+        except Exception as e:
+            logger.debug(f"OpenCV ANPR plate locator failed: {e}")
+
+        # ── 3. No plate detected — return empty list ────────────────────────
         return []
 
     def _resolve_weights(self, weights_path: str) -> str:

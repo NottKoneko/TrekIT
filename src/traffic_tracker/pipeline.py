@@ -252,7 +252,8 @@ class TrafficPipeline:
                 already_has_plate = best_plate_weight >= 1.5  # ~2 confident reads
 
                 if not already_has_plate and ocr_attempts < 6:
-                    if self._frame_idx % getattr(self, "ocr_every_n", 3) == 0:
+                    ocr_stride = getattr(self, "ocr_every_n", 1)
+                    if self._frame_idx % max(1, ocr_stride) == 0:
                         plate_crop = crop_bbox(frame, plate_det.bbox)
                         if plate_crop is not None:
                             text, conf = self.ocr.read(plate_crop)
@@ -261,12 +262,14 @@ class TrafficPipeline:
                                 # Weight plate reads by confidence squared
                                 state.plate_votes[text] += conf ** 2
 
-                # Draw plate box on annotated frame
+            # ── Draw plate box on annotated frame (highest-confidence candidate only) ──
+            if plates:
+                best_plate_det = max(plates, key=lambda p: p.confidence)
                 current_plate = (
                     max(state.plate_votes, key=state.plate_votes.get)
                     if state.plate_votes else ""
                 )
-                draw_plate_overlay(annotated, plate_det.bbox, current_plate)
+                draw_plate_overlay(annotated, best_plate_det.bbox, current_plate)
 
             # ── Derive stable labels from votes ──────────────────────────
             color_lbl, type_lbl, plate_text = self._get_stable_labels(state)

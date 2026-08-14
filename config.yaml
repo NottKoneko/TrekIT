@@ -87,7 +87,7 @@ classification:
 ocr:
   languages: ["en"]              # EasyOCR language list
   gpu: true                     # CUDA GPU enabled for EasyOCR
-  min_confidence: 0.20           # Lowered min OCR confidence to capture plates
+  min_confidence: 0.15           # Min OCR confidence threshold (captures shadowed/distant plates)
   ocr_every_n_frames: 1          # Run EasyOCR every frame per vehicle
 
   # Image preprocessing toggles
@@ -100,7 +100,7 @@ ocr:
 
   # Plate text post-processing
   regex_patterns:
-    - "^[A-Z0-9]{2,8}$"          # Flexible alphanumeric plate reading
+    - "^[A-Z0-9]{2,12}$"         # Flexible alphanumeric plate reading
     - "^[A-Z]{1,3}[0-9]{1,4}[A-Z]{0,3}$"  # Common US/EU formats
   strip_chars: "!@#$%^&*()_+-=[]{}|;':\",./<>?"
 
