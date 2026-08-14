@@ -188,7 +188,7 @@ def process_video(
             pix_fmt_in="bgr24",
             quality=9,
             macro_block_size=1,
-            ffmpeg_params=["-crf", "18", "-preset", "fast"],
+            output_params=["-crf", "18", "-preset", "fast"],
         )
         ffmpeg_writer.send(None)  # initialize stream
 
