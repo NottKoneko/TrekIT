@@ -86,16 +86,21 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
     return best_color, round(confidence, 3)
 
 
-# ── MobileNetV3 Builder ─────────────────────────────────────────────────────
-def _build_mobilenet(num_classes: int) -> nn.Module:
-    """Build a MobileNetV3-Large model matching torchvision layout.
-
-    Uses Large to match the training notebook (mobilenet_v3_large).
-    Large has a 1280-dim classifier head vs 576 in Small — state dict
-    will fail to load if the wrong variant is used here.
-    """
+# ── MobileNetV3 Builders ───────────────────────────────────────────────────
+def _build_mobilenet_large(num_classes: int) -> nn.Module:
+    """Build a MobileNetV3-Large model."""
     base = models.mobilenet_v3_large(
         weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
+    )
+    in_features = base.classifier[-1].in_features
+    base.classifier[-1] = nn.Linear(in_features, num_classes)
+    return base
+
+
+def _build_mobilenet_small(num_classes: int) -> nn.Module:
+    """Build a MobileNetV3-Small model."""
+    base = models.mobilenet_v3_small(
+        weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
     )
     in_features = base.classifier[-1].in_features
     base.classifier[-1] = nn.Linear(in_features, num_classes)
@@ -105,7 +110,7 @@ def _build_mobilenet(num_classes: int) -> nn.Module:
 # ── Public classifier class ─────────────────────────────────────────────────
 class VehicleClassifier:
     """
-    Classifies vehicle color (10 classes) and body type (7 classes).
+    Classifies vehicle color (15 classes) and body type (7 classes).
 
     Usage:
         clf = VehicleClassifier(config)
@@ -221,7 +226,7 @@ class VehicleClassifier:
         num_classes: int,
         name: str,
     ) -> Optional[nn.Module]:
-        """Load MobileNetV3 from weights file, or None if not found."""
+        """Load MobileNetV3 from weights file, auto-detecting Small vs Large architecture."""
         if not weights_path or not Path(weights_path).exists():
             logger.warning(
                 f"No {name} classifier weights found at '{weights_path}'. "
@@ -238,15 +243,28 @@ class VehicleClassifier:
                 new_key = k[4:] if k.startswith("net.") else k
                 cleaned_state[new_key] = v
 
-            # Detect output dimension from classifier head weight shape
+            # Detect output class dimension from classifier head
             if "classifier.3.weight" in cleaned_state:
                 num_classes = cleaned_state["classifier.3.weight"].shape[0]
 
-            model = _build_mobilenet(num_classes)
+            # Detect Small vs Large variant from classifier.0 input dimension (576 vs 960)
+            is_small = False
+            if "classifier.0.weight" in cleaned_state:
+                in_feat = cleaned_state["classifier.0.weight"].shape[1]
+                if in_feat == 576:
+                    is_small = True
+
+            if is_small:
+                model = _build_mobilenet_small(num_classes)
+                arch_name = "MobileNetV3-Small"
+            else:
+                model = _build_mobilenet_large(num_classes)
+                arch_name = "MobileNetV3-Large"
+
             model.load_state_dict(cleaned_state)
             model.to(self.device)
             model.eval()
-            logger.info(f"Loaded {name} classifier ({num_classes} classes) from: {weights_path}")
+            logger.info(f"Loaded {name} classifier ({arch_name}, {num_classes} classes) from: {weights_path}")
             return model
         except Exception as e:
             logger.error(f"Failed to load {name} classifier: {e}")
