@@ -94,13 +94,13 @@ class VehicleDetector:
         self.plate_class_id = self.cfg.get("plate_class_id", 0)
 
         # ── Load vehicle detector (yolov8n.pt for COCO vehicle classes) ────
-        coco_weights = self._resolve_weights("models/yolov8n_pretrained.pt")
+        coco_weights = weights_path or self._resolve_weights("models/yolov8n_pretrained.pt")
         logger.info(f"Loading vehicle detector from: {coco_weights}")
         self.model = YOLO(coco_weights)
         self.model.to(self.device)
 
         # ── Load custom license plate detector (plate_detector.pt) ─────────
-        custom_plate_path = weights_path or config.get("paths", {}).get("yolo_weights", "")
+        custom_plate_path = plate_weights_path or config.get("paths", {}).get("yolo_weights", "")
         self.plate_model = None
         if custom_plate_path and Path(custom_plate_path).exists():
             logger.info(f"Loading license plate detector from: {custom_plate_path}")
