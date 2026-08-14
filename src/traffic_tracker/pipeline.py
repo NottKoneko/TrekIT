@@ -256,23 +256,23 @@ class TrafficPipeline:
                             self.ema_alpha * p_type + (1.0 - self.ema_alpha) * state.type_probs
                         )
 
-            # ── OCR on plate sub-regions (cached & skip-frame for speed) ─────
-            for plate_det in plates:
-                ocr_attempts = state.ocr_attempts
-                best_plate_weight = (
-                    max(state.plate_votes.values()) if state.plate_votes else 0.0
-                )
-                already_has_plate = best_plate_weight >= 1.5
+            # ── OCR on plate sub-regions (runs until a confident plate is read) ─────
+            best_plate_weight = (
+                max(state.plate_votes.values()) if state.plate_votes else 0.0
+            )
+            already_has_plate = best_plate_weight >= 1.5
 
-                if not already_has_plate and ocr_attempts < 6:
-                    ocr_stride = getattr(self, "ocr_every_n", 1)
-                    if self._frame_idx % max(1, ocr_stride) == 0:
+            if not already_has_plate and plates:
+                ocr_stride = getattr(self, "ocr_every_n", 1)
+                if self._frame_idx % max(1, ocr_stride) == 0:
+                    for plate_det in plates:
                         plate_crop = crop_bbox(frame, plate_det.bbox)
                         if plate_crop is not None:
                             text, conf = self.ocr.read(plate_crop)
-                            state.ocr_attempts = ocr_attempts + 1
+                            state.ocr_attempts += 1
                             if text and len(text) >= 2:
                                 state.plate_votes[text] += conf ** 2
+                                break
 
             # ── Draw plate box on annotated frame (highest-confidence candidate) ──
             if plates:
