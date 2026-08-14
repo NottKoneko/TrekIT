@@ -28,6 +28,18 @@ from torchvision import models, transforms
 logger = logging.getLogger(__name__)
 
 
+def preprocess_crop(crop_bgr: np.ndarray, target_size: Tuple[int, int] = (224, 224)) -> Optional[Image.Image]:
+    """Properly convert BGR crop from OpenCV to RGB PIL Image for torchvision consistency."""
+    if crop_bgr is None or crop_bgr.size == 0:
+        return None
+    if len(crop_bgr.shape) == 2:
+        crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_GRAY2BGR)
+    elif len(crop_bgr.shape) == 3 and crop_bgr.shape[2] == 4:
+        crop_bgr = cv2.cvtColor(crop_bgr, cv2.COLOR_BGRA2BGR)
+    crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(crop_rgb)
+
+
 # ── Transform used for all MobileNetV3 inference ───────────────────────────
 def _make_transform(input_size: int = 224) -> transforms.Compose:
     return transforms.Compose([
@@ -263,9 +275,11 @@ class VehicleClassifier:
         model: nn.Module,
     ) -> np.ndarray:
         """Run a BGR crop through a MobileNetV3 model and return softmax probability vector."""
-        # Convert BGR to RGB for ImageNet-trained models
-        img_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
+        n_classes = len(self.color_classes) if model == self.color_model else len(self.type_classes)
+        pil_img = preprocess_crop(crop_bgr)
+        if pil_img is None:
+            return np.ones(n_classes, dtype=np.float32) / n_classes
+
         tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
         logits = model(tensor)
         probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
