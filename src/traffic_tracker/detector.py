@@ -328,8 +328,16 @@ class VehicleDetector:
                     cx, cy, cw, ch = cv2.boundingRect(cnt)
                     aspect_ratio = cw / float(max(ch, 1))
                     area = cw * ch
+                    mid_x = cx + cw / 2.0
+                    abs_y = ymin + cy
 
-                    if 1.5 <= aspect_ratio <= 6.0 and 80 <= area <= (lw * lh * 0.50):
+                    # Reject contours at outer edges (headlights/taillights/mirrors) or too high up
+                    if not (0.15 * vw <= mid_x <= 0.85 * vw):
+                        continue
+                    if abs_y < 0.35 * vh:
+                        continue
+
+                    if 1.5 <= aspect_ratio <= 5.8 and 80 <= area <= (lw * lh * 0.40):
                         abs_px1 = x1 + cx
                         abs_py1 = y1 + ymin + cy
                         abs_px2 = x1 + cx + cw

@@ -163,22 +163,18 @@ def process_video(
 
         logger.info(f"Video: {width}×{height} @ {fps:.1f}fps, {total_frames} frames ({duration_sec:.1f}s)")
 
-        # ── Downscale 4K output to 1080p for browser playback & fast processing
+        # ── Output dimensions (preserve native 4K / 1080p resolution) ────
         out_w, out_h = width, height
-        if max(width, height) > 1920:
-            scale_out = 1920 / max(width, height)
-            out_w = int(width * scale_out)
-            out_h = int(height * scale_out)
-            # Make width and height even (FFmpeg requirement)
-            out_w = out_w if out_w % 2 == 0 else out_w - 1
-            out_h = out_h if out_h % 2 == 0 else out_h - 1
-            logger.info(f"Downscaling output {width}×{height} → {out_w}×{out_h}")
+        # Ensure dimensions are even (FFmpeg requirement)
+        out_w = out_w if out_w % 2 == 0 else out_w - 1
+        out_h = out_h if out_h % 2 == 0 else out_h - 1
+        logger.info(f"Encoding output at native resolution {out_w}×{out_h} (CRF 18 High Quality)")
 
         # ── Frame stride: stride=1 processes every frame for seamless Kalman tracking
         stride = 1
         output_fps = fps
 
-        # ── H.264 video writer (stream directly via imageio_ffmpeg) ───────
+        # ── H.264 video writer (high quality CRF 18 to preserve crystal-clear text) ──
         tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         out_path = tmp.name
         tmp.close()
@@ -190,8 +186,9 @@ def process_video(
             fps=output_fps,
             codec="libx264",
             pix_fmt_in="bgr24",
-            quality=6,
+            quality=9,
             macro_block_size=1,
+            ffmpeg_params=["-crf", "18", "-preset", "fast"],
         )
         ffmpeg_writer.send(None)  # initialize stream
 
@@ -203,10 +200,7 @@ def process_video(
                     if not ret:
                         break
 
-                    # Downscale frame before processing if 4K
-                    if (out_w, out_h) != (width, height):
-                        frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
-
+                    # Process native full-resolution frame
                     annotated, _ = pipeline.process_frame(frame)
                     ffmpeg_writer.send(annotated)
                     frame_idx += 1
