@@ -329,14 +329,14 @@ class VehicleDetector:
                     aspect_ratio = cw / float(max(ch, 1))
                     area = cw * ch
 
-                    if 1.6 <= aspect_ratio <= 5.8 and 220 <= area <= (lw * lh * 0.45):
+                    if 1.5 <= aspect_ratio <= 6.0 and 80 <= area <= (lw * lh * 0.50):
                         abs_px1 = x1 + cx
                         abs_py1 = y1 + ymin + cy
                         abs_px2 = x1 + cx + cw
                         abs_py2 = y1 + ymin + cy + ch
 
-                        pad_w = int(cw * 0.08)
-                        pad_h = int(ch * 0.08)
+                        pad_w = int(cw * 0.12)
+                        pad_h = int(ch * 0.12)
                         abs_px1 = max(0, abs_px1 - pad_w)
                         abs_py1 = max(0, abs_py1 - pad_h)
                         abs_px2 = min(w, abs_px2 + pad_w)

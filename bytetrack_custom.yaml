@@ -2,10 +2,9 @@
 # Optimized for dashcam / traffic CCTV footage to prevent track fragmentation
 
 tracker_type: bytetrack
-track_high_thresh: 0.20    # Threshold for first-round association
-track_low_thresh: 0.05     # Low-confidence threshold for second-round association (retains tracks during momentary dips)
-new_track_thresh: 0.30     # Threshold for creating a new track
+track_high_thresh: 0.40    # High-confidence detections for primary association
+track_low_thresh: 0.10     # Low-confidence detections for secondary recovery association
+new_track_thresh: 0.50     # Confirmed detection required to initialize a NEW track (filters out noise)
 track_buffer: 60           # Retain lost tracks for 60 frames (2+ seconds) through glare, occlusion, or blur
-match_thresh: 0.70         # IoU threshold for matching
+match_thresh: 0.75         # IoU threshold for matching
 fuse_score: True
-gmc_method: sparseOptFlow  # Global motion compensation for moving dashcam

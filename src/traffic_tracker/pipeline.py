@@ -71,6 +71,7 @@ class _TrackState:
     plate_votes: defaultdict = field(default_factory=lambda: defaultdict(float))
     frame_first_seen: int = 0
     frame_last_seen: int = 0
+    hit_count: int = 0                         # Number of frames this track has been detected
     ocr_attempts: int = 0
     best_crop: Optional[np.ndarray] = None   # highest-confidence frame crop
     _best_conf: float = 0.0                  # confidence of best_crop
@@ -151,6 +152,7 @@ class TrafficPipeline:
 
         self.vote_window: int = track_cfg.get("vote_window", 10)
         self.min_votes: int = track_cfg.get("min_votes", 3)
+        self.min_hits: int = track_cfg.get("min_hits", 3)
         self.ema_alpha: float = track_cfg.get("ema_alpha", 0.25)
         self.classify_every_n: int = clf_cfg.get("classify_every_n_frames", 2)
         self.ocr_every_n: int = self.config.get("ocr", {}).get("ocr_every_n_frames", 1)
@@ -207,9 +209,15 @@ class TrafficPipeline:
             tid = vehicle.track_id
             active_ids.add(tid)
             state = self._tracks[tid]
+            state.hit_count += 1
             state.frame_last_seen = self._frame_idx
             if state.frame_first_seen == 0:
                 state.frame_first_seen = self._frame_idx
+
+            # Check if vehicle touches frame boundaries (edge truncation)
+            hf, wf = frame.shape[:2]
+            vx1, vy1, vx2, vy2 = vehicle.bbox
+            is_edge = (vx1 <= 8 or vy1 <= 8 or vx2 >= wf - 8 or vy2 >= hf - 8)
 
             # 10% padding for full vehicle silhouette (captures roofline/spoiler/C-pillar)
             type_crop = crop_bbox(frame, vehicle.bbox, padding_ratio=0.10)
@@ -226,18 +234,20 @@ class TrafficPipeline:
             if self._frame_idx % self.classify_every_n == 0:
                 if steel_crop is not None:
                     p_color = self.classifier.predict_color_probs(steel_crop)
+                    alpha_c = self.ema_alpha if not is_edge else 0.05
                     if state.color_probs is None:
                         state.color_probs = p_color
                     else:
                         state.color_probs = (
-                            self.ema_alpha * p_color + (1.0 - self.ema_alpha) * state.color_probs
+                            alpha_c * p_color + (1.0 - alpha_c) * state.color_probs
                         )
                     c_conf = float(np.max(state.color_probs))
                     if c_conf > state._best_conf:
                         state.best_crop = steel_crop
                         state._best_conf = c_conf
 
-                if type_crop is not None:
+                # Only update body type when the vehicle is not heavily cut off at screen borders
+                if type_crop is not None and not is_edge:
                     p_type = self.classifier.predict_type_probs(type_crop)
                     if state.type_probs is None:
                         state.type_probs = p_type
@@ -413,7 +423,10 @@ class TrafficPipeline:
         type_lbl: str,
         plate_text: str,
     ):
-        """Create or update a VehicleRecord for this track."""
+        """Create or update a VehicleRecord for this track only if confirmed."""
+        if state.hit_count < self.min_hits:
+            return
+
         color_conf = float(np.max(state.color_probs)) if state.color_probs is not None else 0.0
         type_conf  = float(np.max(state.type_probs))  if state.type_probs  is not None else 0.0
         plate_total = sum(state.plate_votes.values())

@@ -95,8 +95,6 @@ class PlateOCR:
         if plate_crop_bgr is None or plate_crop_bgr.size == 0:
             return "", 0.0
 
-        # Up-scale tiny crops so plate height is at least 90px for EasyOCR accuracy
-        h, w = plate_crop_bgr.shape[:2]
         # Up-scale tiny crops so plate height is at least 100px for EasyOCR accuracy
         h, w = plate_crop_bgr.shape[:2]
         if h < 100 or w < 260:
