@@ -126,9 +126,10 @@ class SmallBasicBlock(nn.Module):
             nn.ReLU(),
             nn.Conv2d(ch_out // 4, ch_out, kernel_size=1),
         )
+        self.shortcut = nn.Conv2d(ch_in, ch_out, kernel_size=1) if ch_in != ch_out else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.block(x)
+        return self.shortcut(x) + self.block(x)
 
 
 class LPRNet(nn.Module):
@@ -143,53 +144,30 @@ class LPRNet(nn.Module):
             nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(3, 3), stride=(1, 1)),
+            nn.MaxPool2d(kernel_size=(2, 2)),
             SmallBasicBlock(64, 64),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(3, 3), stride=(2, 1)),
-            SmallBasicBlock(64, 64),
-            nn.BatchNorm2d(64),
+            nn.MaxPool2d(kernel_size=(2, 1)),
+            SmallBasicBlock(64, 128),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            SmallBasicBlock(64, 64),
-            nn.BatchNorm2d(64),
+            SmallBasicBlock(128, 128),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(3, 3), stride=(2, 2)),
+            nn.MaxPool2d(kernel_size=(2, 1)),
             nn.Dropout(dropout_rate),
-            nn.Conv2d(64, 256, kernel_size=(1, 4), stride=1),
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Conv2d(256, class_num, kernel_size=(13, 1), stride=1),
-            nn.BatchNorm2d(class_num),
-            nn.ReLU(),
-        )
-        self.container = nn.Sequential(
-            nn.Conv2d(448 + self.class_num, self.class_num, kernel_size=1, stride=1),
+            nn.AdaptiveAvgPool2d((1, None)),
+            nn.Conv2d(256, class_num, kernel_size=1, stride=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        keep_features = []
-        for i, layer in enumerate(self.backbone.children()):
-            x = layer(x)
-            if i in [2, 6, 13, 22]:
-                keep_features.append(x)
-
-        global_context = []
-        for i, f in enumerate(keep_features):
-            if i in [0, 1]:
-                f = nn.AvgPool2d(kernel_size=5, stride=5)(f)
-            if i in [2]:
-                f = nn.AvgPool2d(kernel_size=(4, 10), stride=(4, 2))(f)
-            f_pow = torch.pow(f, 2)
-            f_mean = torch.mean(f_pow)
-            f = torch.div(f, f_mean + 1e-5)
-            global_context.append(f)
-
-        x = torch.cat(global_context, 1)
-        x = self.container(x)
-        logits = torch.mean(x, dim=2)
-        return logits
+        logits = self.backbone(x)  # (N, class_num, 1, seq_len)
+        return logits.squeeze(2)   # (N, class_num, seq_len)
 
 
 def decode_lpr_logits(logits: torch.Tensor, chars_list: List[str] = LPR_CHARS) -> Tuple[str, float]:
@@ -258,7 +236,7 @@ class PlateOCR:
                 try:
                     if str(w_path).endswith(".pt"):
                         model = LPRNet(class_num=len(self.alpr_chars))
-                        state_dict = torch.load(w_path, map_location=self.device)
+                        state_dict = torch.load(w_path, map_location=self.device, weights_only=True)
                         model.load_state_dict(state_dict)
                         model.to(self.device)
                         model.eval()
