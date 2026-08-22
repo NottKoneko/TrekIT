@@ -442,23 +442,14 @@ class PlateOCR:
 
     @torch.no_grad()
     def _read_lprnet(self, plate_crop_bgr: np.ndarray) -> Tuple[str, float]:
-        """Run dedicated LPRNet sequence model inference with beam search and unwarping."""
+        """Run dedicated LPRNet sequence model inference with beam search directly on plate crop."""
         try:
-            # 1. 4-Point perspective unwarping
-            unwarped = unwarp_plate(plate_crop_bgr, target_size=(94, 24))
-
-            # 2. Trim top 14% (state name / "California" header) and bottom 10% (frame text)
-            h, w = unwarped.shape[:2]
-            clean_crop = unwarped
-            if h >= 14 and w >= 24:
-                top_cut = int(h * 0.14)
-                bot_cut = max(top_cut + 8, int(h * 0.90))
-                clean_crop = unwarped[top_cut:bot_cut, :]
-                if clean_crop.size == 0:
-                    clean_crop = unwarped
+            h, w = plate_crop_bgr.shape[:2]
+            if h < 8 or w < 16:
+                return "", 0.0
 
             # LPRNet expects (94, 24) input in RGB
-            img = cv2.resize(clean_crop, (94, 24), interpolation=cv2.INTER_CUBIC)
+            img = cv2.resize(plate_crop_bgr, (94, 24), interpolation=cv2.INTER_CUBIC)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = img.astype(np.float32)
             img = (img - 127.5) * 0.0078125
@@ -474,7 +465,12 @@ class PlateOCR:
             best_cand, best_score = "", 0.0
             for raw_text, conf in candidates:
                 cleaned = self._clean_text(raw_text)
+                # Reject repetitive identical characters (e.g. "BBBBBBBB", "8BBB888", "2222222") and short noise
+                if len(cleaned) < 3 or len(set(cleaned)) <= 2:
+                    continue
                 normalized = normalize_plate_format(cleaned) if len(cleaned) == 7 else cleaned
+                if not normalized or len(set(normalized)) <= 2:
+                    continue
                 is_valid = self._matches_plate_pattern(normalized)
                 score = conf * (1.5 if is_valid else 1.0)
                 if score > best_score:
@@ -496,17 +492,11 @@ class PlateOCR:
 
         if self.alpr_model is not None:
             try:
-                unwarped = unwarp_plate(plate_crop_bgr, target_size=(94, 24))
-                h, w = unwarped.shape[:2]
-                clean_crop = unwarped
-                if h >= 14 and w >= 24:
-                    top_cut = int(h * 0.14)
-                    bot_cut = max(top_cut + 8, int(h * 0.90))
-                    clean_crop = unwarped[top_cut:bot_cut, :]
-                    if clean_crop.size == 0:
-                        clean_crop = unwarped
+                h, w = plate_crop_bgr.shape[:2]
+                if h < 8 or w < 16:
+                    return []
 
-                img = cv2.resize(clean_crop, (94, 24), interpolation=cv2.INTER_CUBIC)
+                img = cv2.resize(plate_crop_bgr, (94, 24), interpolation=cv2.INTER_CUBIC)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
                 img = (img - 127.5) * 0.0078125
                 img = np.transpose(img, (2, 0, 1))
@@ -520,8 +510,10 @@ class PlateOCR:
                 seen = set()
                 for text, conf in candidates:
                     cleaned = self._clean_text(text)
+                    if len(cleaned) < 3 or len(set(cleaned)) <= 2:
+                        continue
                     norm = normalize_plate_format(cleaned) if len(cleaned) == 7 else cleaned
-                    if norm and norm not in seen:
+                    if norm and len(set(norm)) > 2 and norm not in seen:
                         seen.add(norm)
                         out.append({"text": norm, "confidence": round(float(conf), 2)})
                 return out[:top_k]
@@ -530,7 +522,7 @@ class PlateOCR:
 
         # EasyOCR fallback
         text, conf = self.read(plate_crop_bgr)
-        if text:
+        if text and len(text) >= 3 and len(set(text)) > 2:
             return [{"text": text, "confidence": round(float(conf), 2)}]
         return []
 

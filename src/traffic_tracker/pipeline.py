@@ -417,10 +417,18 @@ class TrafficPipeline:
             best_plate_det = None
 
             for plate_det in vehicle.plates:
+                # Gating: only run on confident plate boxes (>= 0.35 confidence and area >= 150px)
+                if plate_det.conf < 0.35:
+                    continue
+                pw = plate_det.bbox[2] - plate_det.bbox[0]
+                ph = plate_det.bbox[3] - plate_det.bbox[1]
+                if pw * ph < 150:
+                    continue
+
                 plate_crop = crop_bbox(image, plate_det.bbox)
                 if plate_crop is not None:
                     text, conf = self.ocr.read(plate_crop)
-                    if text and len(text) >= 3:
+                    if text and len(text) >= 3 and len(set(text)) > 2:
                         is_valid = self.ocr._matches_plate_pattern(text)
                         score = conf * (2.5 if is_valid else (1.0 if len(text) >= 5 else 0.5))
                         if score > best_score:

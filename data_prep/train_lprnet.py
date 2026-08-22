@@ -111,8 +111,8 @@ class SyntheticPlateDataset(Dataset):
         for fc in font_candidates:
             if Path(fc).exists() or os.path.exists(fc):
                 try:
-                    self.font = ImageFont.truetype(fc, size=38)
-                    self.small_font = ImageFont.truetype(fc, size=12)
+                    self.font = ImageFont.truetype(fc, size=32)
+                    self.small_font = ImageFont.truetype(fc, size=9)
                     break
                 except Exception:
                     pass
@@ -125,38 +125,38 @@ class SyntheticPlateDataset(Dataset):
 
     def __getitem__(self, idx):
         # 1. Generate text
-        if random.random() < 0.80:
+        if random.random() < 0.85:
             plate_str = f"{random.choice('123456789')}{''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ', k=3))}{''.join(random.choices('0123456789', k=3))}"
         else:
             plate_str = "".join(random.choices(self.chars, k=random.randint(5, 7)))
 
-        # 2. Render base plate canvas (280 x 140)
+        # 2. Render base plate canvas at 188 x 48 (exact 4:1 aspect ratio matching 94x24)
         base_color = (random.randint(225, 250), random.randint(225, 250), random.randint(225, 250))
-        img = Image.new("RGB", (280, 140), color=base_color)
+        img = Image.new("RGB", (188, 48), color=base_color)
         draw = ImageDraw.Draw(img)
 
         # Procedural state header (Red "CALIFORNIA" script across top margin)
-        if random.random() < 0.85:
+        if random.random() < 0.80:
             header_color = (random.randint(180, 220), random.randint(20, 40), random.randint(20, 40))
-            draw.text((85, 8), "CALIFORNIA", fill=header_color, font=self.small_font)
+            draw.text((58, 2), "CALIFORNIA", fill=header_color, font=self.small_font)
 
         # Random bolt holes / screw caps
         bolt_color = (random.randint(40, 90), random.randint(40, 90), random.randint(40, 90))
-        draw.ellipse([25, 12, 35, 22], fill=bolt_color)
-        draw.ellipse([245, 12, 255, 22], fill=bolt_color)
+        draw.ellipse([10, 4, 16, 10], fill=bolt_color)
+        draw.ellipse([172, 4, 178, 10], fill=bolt_color)
 
-        # 3. Embossed drop shadows & main characters
+        # 3. Embossed drop shadows & main characters (naturally fills height)
         text_color = (random.randint(15, 45), random.randint(25, 55), random.randint(70, 120))  # dark navy/black
         shadow_color = (random.randint(100, 140), random.randint(100, 140), random.randint(100, 140))
 
         # Calculate character spacing
         n_chars = len(plate_str)
-        char_w = 34
-        start_x = max(15, (280 - n_chars * char_w) // 2)
+        char_w = 23
+        start_x = max(6, (188 - n_chars * char_w) // 2)
 
         for i, ch in enumerate(plate_str):
             cx = start_x + i * char_w + random.randint(-1, 1)
-            cy = 40 + random.randint(-1, 1)
+            cy = 6 + random.randint(-1, 1)
             # Embossed drop shadow
             draw.text((cx + 1, cy + 1), ch, fill=shadow_color, font=self.font)
             # Main character glyph
@@ -165,9 +165,9 @@ class SyntheticPlateDataset(Dataset):
         # 4. Perspective warp & slight variation
         cv_img = np.array(img)
         h, w = cv_img.shape[:2]
-        if random.random() < 0.50:
-            dx = random.randint(2, 8)
-            dy = random.randint(2, 6)
+        if random.random() < 0.40:
+            dx = random.randint(1, 4)
+            dy = random.randint(1, 3)
             src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
             dst_pts = np.float32([[dx, dy], [w - dx, 0], [w, h - dy], [0, h]])
             M = cv2.getPerspectiveTransform(src_pts, dst_pts)
