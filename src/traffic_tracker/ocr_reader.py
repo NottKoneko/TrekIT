@@ -197,6 +197,138 @@ def decode_lpr_logits(logits: torch.Tensor, chars_list: List[str] = LPR_CHARS) -
     return raw_text, avg_conf
 
 
+def beam_search_ctc(
+    logits: torch.Tensor,
+    chars_list: List[str] = LPR_CHARS,
+    beam_width: int = 5,
+    blank_idx: Optional[int] = None,
+) -> List[Tuple[str, float]]:
+    """
+    Decodes LPRNet sequence logits using Prefix Beam Search.
+    Returns Top-K ranked candidates with sequence probability scores.
+    """
+    if blank_idx is None:
+        blank_idx = len(chars_list) - 1
+
+    probs = torch.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()  # (C, T)
+    classes, time_steps = probs.shape
+
+    # Initialize beams: prefix -> (prob_blank, prob_non_blank)
+    beams = {"": (1.0, 0.0)}
+
+    for t in range(time_steps):
+        next_beams = {}
+        for prefix, (p_b, p_nb) in beams.items():
+            p_total = p_b + p_nb
+
+            # 1. Blank token transition
+            p_b_next = p_total * float(probs[blank_idx, t])
+            curr_b, curr_nb = next_beams.get(prefix, (0.0, 0.0))
+            next_beams[prefix] = (curr_b + p_b_next, curr_nb)
+
+            # 2. Non-blank token transitions
+            for c in range(classes):
+                if c == blank_idx:
+                    continue
+                char = chars_list[c]
+                p_char = float(probs[c, t])
+                new_prefix = prefix + char
+
+                if len(prefix) > 0 and prefix[-1] == char:
+                    # Repeating character without blank in-between
+                    p_nb_next = p_b * p_char
+                    curr_b, curr_nb = next_beams.get(new_prefix, (0.0, 0.0))
+                    next_beams[new_prefix] = (curr_b, curr_nb + p_nb_next)
+
+                    # Collapse with existing prefix
+                    curr_b_same, curr_nb_same = next_beams.get(prefix, (0.0, 0.0))
+                    next_beams[prefix] = (curr_b_same, curr_nb_same + p_nb * p_char)
+                else:
+                    curr_b, curr_nb = next_beams.get(new_prefix, (0.0, 0.0))
+                    next_beams[new_prefix] = (curr_b, curr_nb + p_total * p_char)
+
+        # Prune down to top beam_width prefixes
+        sorted_prefixes = sorted(
+            next_beams.items(),
+            key=lambda item: item[1][0] + item[1][1],
+            reverse=True,
+        )[:beam_width]
+        beams = dict(sorted_prefixes)
+
+    results = []
+    for prefix, (p_b, p_nb) in beams.items():
+        if prefix:
+            total_p = p_b + p_nb
+            results.append((prefix, round(float(total_p), 3)))
+
+    return sorted(results, key=lambda x: -x[1])
+
+
+def unwarp_plate(crop_bgr: np.ndarray, target_size: Tuple[int, int] = (94, 24)) -> np.ndarray:
+    """
+    Isolates and rectifies rotated/skewed license plate contours to a frontal perspective plane.
+    Uses minimum area bounding quadrilateral and perspective homography transformation.
+    """
+    if crop_bgr is None or crop_bgr.size == 0:
+        return crop_bgr
+
+    h, w = crop_bgr.shape[:2]
+    if h < 10 or w < 20:
+        return crop_bgr
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+    blurred = cv2.bilateralFilter(gray, 5, 40, 40)
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return crop_bgr
+
+    # Find valid plate-like contour
+    valid_rects = []
+    min_area = (h * w) * 0.12
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+        rect = cv2.minAreaRect(cnt)
+        rw, rh = rect[1]
+        if rw == 0 or rh == 0:
+            continue
+        ar = max(rw, rh) / min(rw, rh)
+        if 1.5 <= ar <= 6.5:
+            valid_rects.append((area, rect))
+
+    if not valid_rects:
+        largest_cnt = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest_cnt) < min_area:
+            return crop_bgr
+        rect = cv2.minAreaRect(largest_cnt)
+    else:
+        rect = max(valid_rects, key=lambda x: x[0])[1]
+
+    box = cv2.boxPoints(rect)
+    pts = np.array(box, dtype="float32")
+
+    # Order points: top-left, top-right, bottom-right, bottom-left
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1)
+    ordered = np.zeros((4, 2), dtype="float32")
+    ordered[0] = pts[np.argmin(s)]       # top-left
+    ordered[2] = pts[np.argmax(s)]       # bottom-right
+    ordered[1] = pts[np.argmin(diff)]    # top-right
+    ordered[3] = pts[np.argmax(diff)]    # bottom-left
+
+    tw, th = target_size
+    dst = np.array([[0, 0], [tw - 1, 0], [tw - 1, th - 1], [0, th - 1]], dtype="float32")
+    try:
+        M = cv2.getPerspectiveTransform(ordered, dst)
+        warped = cv2.warpPerspective(crop_bgr, M, (tw, th), flags=cv2.INTER_CUBIC)
+        return warped if warped is not None and warped.size > 0 else crop_bgr
+    except Exception:
+        return crop_bgr
+
+
 class PlateOCR:
     """
     Reads text from license plate image crops using dedicated ALPR (LPRNet) or EasyOCR fallback.
@@ -296,17 +428,20 @@ class PlateOCR:
 
     @torch.no_grad()
     def _read_lprnet(self, plate_crop_bgr: np.ndarray) -> Tuple[str, float]:
-        """Run dedicated LPRNet sequence model inference on plate crop."""
+        """Run dedicated LPRNet sequence model inference with beam search and unwarping."""
         try:
-            h, w = plate_crop_bgr.shape[:2]
-            # Trim top 14% (state name / "California" header / handle shadow) and bottom 10% (frame text / screw caps)
-            clean_crop = plate_crop_bgr
+            # 1. 4-Point perspective unwarping
+            unwarped = unwarp_plate(plate_crop_bgr, target_size=(94, 24))
+
+            # 2. Trim top 14% (state name / "California" header) and bottom 10% (frame text)
+            h, w = unwarped.shape[:2]
+            clean_crop = unwarped
             if h >= 14 and w >= 24:
                 top_cut = int(h * 0.14)
                 bot_cut = max(top_cut + 8, int(h * 0.90))
-                clean_crop = plate_crop_bgr[top_cut:bot_cut, :]
+                clean_crop = unwarped[top_cut:bot_cut, :]
                 if clean_crop.size == 0:
-                    clean_crop = plate_crop_bgr
+                    clean_crop = unwarped
 
             # LPRNet expects (94, 24) input in RGB
             img = cv2.resize(clean_crop, (94, 24), interpolation=cv2.INTER_CUBIC)
@@ -317,13 +452,73 @@ class PlateOCR:
             tensor = torch.from_numpy(img).unsqueeze(0).to(self.device)
 
             logits = self.alpr_model(tensor)
-            raw_text, conf = decode_lpr_logits(logits, self.alpr_chars)
-            cleaned = self._clean_text(raw_text)
-            normalized = normalize_plate_format(cleaned) if len(cleaned) == 7 else cleaned
-            return normalized, round(conf, 3)
+            candidates = beam_search_ctc(logits, self.alpr_chars, beam_width=5)
+            if not candidates:
+                raw_text, conf = decode_lpr_logits(logits, self.alpr_chars)
+                candidates = [(raw_text, conf)]
+
+            best_cand, best_score = "", 0.0
+            for raw_text, conf in candidates:
+                cleaned = self._clean_text(raw_text)
+                normalized = normalize_plate_format(cleaned) if len(cleaned) == 7 else cleaned
+                is_valid = self._matches_plate_pattern(normalized)
+                score = conf * (1.5 if is_valid else 1.0)
+                if score > best_score:
+                    best_score = score
+                    best_cand = normalized
+
+            return best_cand, round(min(best_score, 1.0), 3)
         except Exception as e:
             logger.debug(f"LPRNet inference error: {e}")
             return "", 0.0
+
+    def read_candidates(self, plate_crop_bgr: np.ndarray, top_k: int = 5) -> List[dict]:
+        """
+        Returns ranked Top-K candidate dictionaries:
+        [{"text": "9GAD429", "confidence": 0.98}, {"text": "9GAD129", "confidence": 0.74}]
+        """
+        if plate_crop_bgr is None or plate_crop_bgr.size == 0:
+            return []
+
+        if self.alpr_model is not None:
+            try:
+                unwarped = unwarp_plate(plate_crop_bgr, target_size=(94, 24))
+                h, w = unwarped.shape[:2]
+                clean_crop = unwarped
+                if h >= 14 and w >= 24:
+                    top_cut = int(h * 0.14)
+                    bot_cut = max(top_cut + 8, int(h * 0.90))
+                    clean_crop = unwarped[top_cut:bot_cut, :]
+                    if clean_crop.size == 0:
+                        clean_crop = unwarped
+
+                img = cv2.resize(clean_crop, (94, 24), interpolation=cv2.INTER_CUBIC)
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32)
+                img = (img - 127.5) * 0.0078125
+                img = np.transpose(img, (2, 0, 1))
+                tensor = torch.from_numpy(img).unsqueeze(0).to(self.device)
+
+                with torch.no_grad():
+                    logits = self.alpr_model(tensor)
+                    candidates = beam_search_ctc(logits, self.alpr_chars, beam_width=top_k)
+
+                out = []
+                seen = set()
+                for text, conf in candidates:
+                    cleaned = self._clean_text(text)
+                    norm = normalize_plate_format(cleaned) if len(cleaned) == 7 else cleaned
+                    if norm and norm not in seen:
+                        seen.add(norm)
+                        out.append({"text": norm, "confidence": round(float(conf), 2)})
+                return out[:top_k]
+            except Exception as e:
+                logger.debug(f"Candidate decoding error: {e}")
+
+        # EasyOCR fallback
+        text, conf = self.read(plate_crop_bgr)
+        if text:
+            return [{"text": text, "confidence": round(float(conf), 2)}]
+        return []
 
     def read_all(
         self, plate_crop_bgr: np.ndarray

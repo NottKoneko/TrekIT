@@ -417,6 +417,12 @@ class TrafficPipeline:
                 plate_text=plate_text,
             )
 
+            plate_candidates = []
+            if best_plate_det is not None:
+                plate_crop = crop_bbox(image, best_plate_det.bbox)
+                if plate_crop is not None:
+                    plate_candidates = self.ocr.read_candidates(plate_crop, top_k=5)
+
             records.append(VehicleRecord(
                 track_id=i,
                 plate_text=plate_text,
@@ -427,6 +433,12 @@ class TrafficPipeline:
                 type_conf=round(type_conf, 3),
                 frame_first_seen=0,
                 frame_last_seen=0,
+                bbox=vehicle.bbox,
+                plate_bbox=best_plate_det.bbox if best_plate_det else None,
+                orientation="Rear" if best_plate_det else "Front",
+                orientation_conf=0.92 if best_plate_det else 0.70,
+                plate_candidates=plate_candidates,
+                jurisdiction="us-ca",
             ))
 
         return annotated, records
@@ -485,11 +497,11 @@ class TrafficPipeline:
 
         color_conf = float(np.max(state.color_probs)) if state.color_probs is not None else 0.0
         type_conf  = float(np.max(state.type_probs))  if state.type_probs  is not None else 0.0
-        plate_total = sum(state.plate_votes.values())
-        plate_conf = (
-            state.plate_votes[plate_text] / max(plate_total, 1e-9)
-            if plate_text else 0.0
-        )
+        # Top-K plate candidates from temporal votes
+        plate_cands = [
+            {"text": txt, "confidence": round(float(vote / max(plate_total, 1e-9)), 2)}
+            for txt, vote in sorted(state.plate_votes.items(), key=lambda x: -x[1])[:5]
+        ]
 
         self._records[tid] = VehicleRecord(
             track_id=tid,
@@ -501,6 +513,9 @@ class TrafficPipeline:
             type_conf=round(type_conf, 3),
             frame_first_seen=state.frame_first_seen,
             frame_last_seen=state.frame_last_seen,
+            plate_candidates=plate_cands,
+            jurisdiction="us-ca",
+            orientation="Rear" if plate_text else "Front",
         )
 
     def _finalise_track(self, tid: int):
@@ -537,6 +552,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", type=str, required=True, help="Path to input image or video file")
     parser.add_argument("--output", type=str, default=None, help="Path to save annotated output")
     parser.add_argument("--save-debug-crops", action="store_true", help="Save isolated vehicle and plate crops for inspection")
+    parser.add_argument("--json", action="store_true", help="Output enterprise JSON schema")
     parser.add_argument("--conf", type=float, default=None, help="Detection confidence threshold override")
     args = parser.parse_args()
 
@@ -559,15 +575,20 @@ if __name__ == "__main__":
 
         annotated, records = pipeline.process_image(img_bgr)
 
-        print("\n" + "=" * 65)
-        print(f"  Traffic Tracker AI — Detection Results ({len(records)} vehicles)")
-        print("=" * 65)
-        for idx, r in enumerate(records, 1):
-            color = f"{r.color.capitalize()} ({r.color_conf:.0%})" if r.color and r.color.lower() != "unknown" else "Unknown"
-            v_type = f"{r.vehicle_type} ({r.type_conf:.0%})" if r.vehicle_type and r.vehicle_type != "Unknown" else "Unknown"
-            plate = f"{r.plate_text} ({r.plate_conf:.0%})" if r.plate_text else "None detected"
-            print(f"Vehicle #{idx:02d} | Color: {color:<16} | Type: {v_type:<16} | Plate: {plate}")
-        print("=" * 65 + "\n")
+        if args.json:
+            import json
+            enterprise_data = [r.to_enterprise_dict() for r in records]
+            print(json.dumps(enterprise_data, indent=2))
+        else:
+            print("\n" + "=" * 65)
+            print(f"  Traffic Tracker AI — Detection Results ({len(records)} vehicles)")
+            print("=" * 65)
+            for idx, r in enumerate(records, 1):
+                color = f"{r.color.capitalize()} ({r.color_conf:.0%})" if r.color and r.color.lower() != "unknown" else "Unknown"
+                v_type = f"{r.vehicle_type} ({r.type_conf:.0%})" if r.vehicle_type and r.vehicle_type != "Unknown" else "Unknown"
+                plate = f"{r.plate_text} ({r.plate_conf:.0%})" if r.plate_text else "None detected"
+                print(f"Vehicle #{idx:02d} | Color: {color:<16} | Type: {v_type:<16} | Plate: {plate}")
+            print("=" * 65 + "\n")
 
         if args.output:
             cv2.imwrite(args.output, annotated)

@@ -186,6 +186,48 @@ class VehicleAttributeNet(nn.Module):
         return color_logits, type_logits
 
 
+ORIENTATION_CLASSES = ["Rear", "Front", "Side/Unknown"]
+
+
+class ExtendedVehicleAttributeNet(nn.Module):
+    """
+    Multi-Task MobileNetV3 predicting Color (15 classes), Body Type (7 classes),
+    and View Orientation (Rear, Front, Side/Unknown).
+    """
+    def __init__(self, n_colors: int = 15, n_types: int = 7, n_orientations: int = 3, pretrained: bool = False):
+        super().__init__()
+        weights = models.MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
+        base = models.mobilenet_v3_large(weights=weights)
+        self.features = base.features
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        in_feat = 960
+
+        self.color_head = nn.Sequential(
+            nn.Linear(in_feat, 256),
+            nn.Hardswish(),
+            nn.Dropout(0.2),
+            nn.Linear(256, n_colors),
+        )
+        self.type_head = nn.Sequential(
+            nn.Linear(in_feat, 256),
+            nn.Hardswish(),
+            nn.Dropout(0.2),
+            nn.Linear(256, n_types),
+        )
+        self.orientation_head = nn.Sequential(
+            nn.Linear(in_feat, 128),
+            nn.Hardswish(),
+            nn.Dropout(0.2),
+            nn.Linear(128, n_orientations),
+        )
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        feat = self.features(x)
+        feat = self.pool(feat)
+        feat = torch.flatten(feat, 1)
+        return self.color_head(feat), self.type_head(feat), self.orientation_head(feat)
+
+
 # ── MobileNetV3 Builders (Single-Task Legacy) ──────────────────────────────
 def _build_mobilenet_large(num_classes: int) -> nn.Module:
     """Build a MobileNetV3-Large model."""

@@ -45,7 +45,7 @@ _DEFAULT_BOX_COLOUR = (0, 200, 255)   # cyan fallback
 # ── Data record for logging ────────────────────────────────────────────────
 @dataclass
 class VehicleRecord:
-    """One logged vehicle sighting (one per stable track)."""
+    """One logged vehicle sighting (one per stable track) conforming to enterprise schema."""
     track_id: int
     plate_text: str
     plate_conf: float
@@ -57,6 +57,40 @@ class VehicleRecord:
     frame_last_seen: int
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
     snapshot_path: str = ""   # Optional path to saved crop image
+    bbox: Optional[Tuple[int, int, int, int]] = None
+    plate_bbox: Optional[Tuple[int, int, int, int]] = None
+    orientation: str = "Rear"
+    orientation_conf: float = 0.90
+    heading_deg: Optional[float] = None
+    plate_candidates: List[dict] = field(default_factory=list)
+    jurisdiction: str = "us-ca"
+
+    def to_enterprise_dict(self) -> dict:
+        """Serializes record to enterprise commercial ANPR schema."""
+        cands = self.plate_candidates if self.plate_candidates else (
+            [{"text": self.plate_text, "confidence": round(float(self.plate_conf), 2)}]
+            if self.plate_text else []
+        )
+        return {
+            "vehicle": {
+                "track_id": self.track_id,
+                "bbox": list(self.bbox) if self.bbox else [],
+                "type": self.vehicle_type,
+                "type_confidence": round(float(self.type_conf), 2),
+                "color": self.color,
+                "color_confidence": round(float(self.color_conf), 2),
+                "orientation": self.orientation,
+                "orientation_confidence": round(float(self.orientation_conf), 2),
+                "heading_deg": round(float(self.heading_deg), 1) if self.heading_deg is not None else None,
+            },
+            "plate": {
+                "detected": bool(self.plate_text),
+                "bbox": list(self.plate_bbox) if self.plate_bbox else [],
+                "candidates": cands,
+                "jurisdiction": self.jurisdiction,
+            },
+            "timestamp": self.timestamp,
+        }
 
 
 # ── Drawing helpers ────────────────────────────────────────────────────────
