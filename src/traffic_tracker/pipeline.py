@@ -247,8 +247,8 @@ class TrafficPipeline:
                         else:
                             state.type_probs = self.ema_alpha * p_type + (1.0 - self.ema_alpha) * state.type_probs
                 else:
-                    if steel_crop is not None:
-                        p_color = self.classifier.predict_color_probs(steel_crop)
+                    if type_crop is not None:
+                        p_color = self.classifier.predict_color_probs(type_crop)
                         alpha_c = self.ema_alpha if not is_edge else 0.05
                         if state.color_probs is None:
                             state.color_probs = p_color
@@ -258,7 +258,7 @@ class TrafficPipeline:
                             )
                         c_conf = float(np.max(state.color_probs))
                         if c_conf > state._best_conf:
-                            state.best_crop = steel_crop
+                            state.best_crop = type_crop
                             state._best_conf = c_conf
 
                     # Only update body type when the vehicle is not heavily cut off at screen borders
@@ -291,25 +291,25 @@ class TrafficPipeline:
                         pw = px2 - px1
                         ph = py2 - py1
 
-                        # Resolution Gate: Skip OCR if plate is too distant/small (saves CPU & prevents garbage)
-                        if pw < 45 or ph < 18:
+                        # Resolution Gate: Allow distant plates (EasyOCR reader upscales small crops)
+                        if pw < 14 or ph < 6:
                             continue
 
                         plate_crop = crop_bbox(frame, plate_det.bbox)
                         if plate_crop is not None:
-                            # Sharpness Gate: Discard heavily motion-blurred plate crops (< 15.0)
+                            # Sharpness Gate: Discard only severe blur; use sharpness for voting weight
                             sharpness = estimate_sharpness(plate_crop)
-                            if sharpness < 15.0:
+                            if sharpness < 3.0 and min(pw, ph) >= 25:
                                 continue
 
                             text, conf = self.ocr.read(plate_crop)
                             state.ocr_attempts += 1
-                            if text and len(text) >= 5:
+                            if text and len(text) >= 3:
                                 # Bonus weight for matching standard plate regex patterns and sharp focus
                                 is_valid_pattern = self.ocr._matches_plate_pattern(text)
-                                mult = 2.0 if is_valid_pattern else 0.5
-                                sharpness_bonus = min(max(sharpness / 50.0, 0.5), 2.0)
-                                state.plate_votes[text] += (conf ** 3) * mult * sharpness_bonus
+                                mult = 2.0 if is_valid_pattern else (0.8 if len(text) >= 5 else 0.4)
+                                sharpness_bonus = min(max(sharpness / 40.0, 0.4), 2.0)
+                                state.plate_votes[text] += (conf ** 2) * mult * sharpness_bonus
                                 # Do NOT break — evaluate all plate candidates in the frame
 
             # ── Draw plate box on annotated frame (highest-confidence candidate) ──
@@ -378,10 +378,11 @@ class TrafficPipeline:
             plate_conf = 0.0
             best_plate_det = None
 
-            if steel_crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(steel_crop)
             if type_crop is not None:
-                type_lbl, type_conf = self.classifier.predict_type(type_crop)
+                color_lbl, color_conf = self.classifier.predict_color(type_crop)
+                type_lbl, type_conf   = self.classifier.predict_type(type_crop)
+            elif steel_crop is not None:
+                color_lbl, color_conf = self.classifier.predict_color(steel_crop)
 
             for plate_det in vehicle.plates:
                 plate_crop = crop_bbox(image, plate_det.bbox)

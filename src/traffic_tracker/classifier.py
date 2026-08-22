@@ -323,21 +323,37 @@ class VehicleClassifier:
         if self.type_model is not None:
             return self._nn_predict_probs(crop_bgr, self.type_model)
 
-        # Fallback to aspect ratio geometric distribution
-        probs = np.ones(n_classes, dtype=np.float32) * (0.20 / max(n_classes - 1, 1))
+        # Fallback to aspect ratio geometric distribution when NN is absent
+        # Note: True CCTV / dashcam angles have high perspective variance.
+        probs = np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
         h, w = crop_bgr.shape[:2]
         if h > 0 and w > 0:
             ar = w / float(h)
-            if ar < 1.10 and "SUV" in self.type_classes:
-                probs[self.type_classes.index("SUV")] = 0.80
-            elif 1.10 <= ar < 1.25 and "Hatchback" in self.type_classes:
-                probs[self.type_classes.index("Hatchback")] = 0.80
-            elif 1.25 <= ar < 1.45 and "Sedan" in self.type_classes:
-                probs[self.type_classes.index("Sedan")] = 0.80
-            elif 1.45 <= ar < 1.68 and "Coupe" in self.type_classes:
-                probs[self.type_classes.index("Coupe")] = 0.80
-            elif "Truck" in self.type_classes:
-                probs[self.type_classes.index("Truck")] = 0.80
+            # Gentle soft prior rather than hard 80% bias
+            prior_weight = 0.35
+            base_prob = (1.0 - prior_weight) / max(n_classes - 1, 1)
+            probs = np.full(n_classes, base_prob, dtype=np.float32)
+            
+            target_class = None
+            if ar < 1.05:
+                target_class = "SUV"
+            elif 1.05 <= ar < 1.25:
+                target_class = "Hatchback"
+            elif 1.25 <= ar < 1.50:
+                target_class = "Sedan"
+            elif 1.50 <= ar < 1.75:
+                target_class = "Coupe"
+            else:
+                target_class = "Truck"
+
+            if target_class and target_class in self.type_classes:
+                probs[self.type_classes.index(target_class)] = prior_weight
+            elif target_class:
+                # Case-insensitive match
+                lower_types = [t.lower() for t in self.type_classes]
+                if target_class.lower() in lower_types:
+                    probs[lower_types.index(target_class.lower())] = prior_weight
+
         return probs / np.sum(probs)
 
     # ── Single-frame prediction API ─────────────────────────────────────

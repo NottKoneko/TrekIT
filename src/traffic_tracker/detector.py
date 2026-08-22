@@ -194,15 +194,23 @@ class VehicleDetector:
                 bbox=bbox,
                 confidence=conf,
             )
-
-            # ── Throttled plate detection: only run every N frames per track ──
-            last = self._plate_last_checked.get(track_id, -9999)
-            if self._frame_count - last >= self.plate_check_every:
-                vehicle.plates = self._detect_plates_in_crop(frame, bbox)
-                self._plate_last_checked[track_id] = self._frame_count
-            # else: vehicle.plates stays empty — pipeline reuses cached plate from state
-
             vehicles.append(vehicle)
+
+        # ── Full-Scene Plate Detection (Scale-Matched) ────────────────────────
+        # Plate models trained on street scenes (plates 2-5% of frame) expect
+        # full-scene context rather than zoomed-in vehicle crops.
+        all_scene_plates: List[Detection] = []
+        if self.plate_model is not None and vehicles:
+            all_scene_plates = self._detect_plates_full_frame(infer_frame, (h, w), scale)
+            self._associate_plates_to_vehicles(vehicles, all_scene_plates)
+
+        # ── Fallback plate detection for vehicles without matched plates ──────
+        for vehicle in vehicles:
+            if not vehicle.plates:
+                last = self._plate_last_checked.get(vehicle.track_id, -9999)
+                if self._frame_count - last >= self.plate_check_every:
+                    vehicle.plates = self._detect_plates_in_crop(frame, vehicle.bbox)
+                    self._plate_last_checked[vehicle.track_id] = self._frame_count
 
         return vehicles
 
@@ -220,6 +228,7 @@ class VehicleDetector:
         if not results or results[0].boxes is None:
             return vehicles
 
+        h, w = image.shape[:2]
         boxes = results[0].boxes
         cls_list = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else []
         conf_list = boxes.conf.cpu().numpy().astype(float) if boxes.conf is not None else []
@@ -234,12 +243,109 @@ class VehicleDetector:
             x1, y1, x2, y2 = xyxy_list[i]
             bbox = (int(x1), int(y1), int(x2), int(y2))
             vehicle = VehicleDetection(track_id=-1, bbox=bbox, confidence=conf)
-            vehicle.plates = self._detect_plates_in_crop(image, bbox)
             vehicles.append(vehicle)
+
+        # Full-scene plate detection
+        if self.plate_model is not None and vehicles:
+            scene_plates = self._detect_plates_full_frame(image, (h, w), scale=1.0)
+            self._associate_plates_to_vehicles(vehicles, scene_plates)
+
+        # Morphological fallback for vehicles without detected plates
+        for vehicle in vehicles:
+            if not vehicle.plates:
+                vehicle.plates = self._detect_plates_in_crop(image, vehicle.bbox)
 
         return vehicles
 
     # ── Internal helpers ────────────────────────────────────────────────
+
+    def _detect_plates_full_frame(
+        self, infer_frame: np.ndarray, orig_shape: Tuple[int, int], scale: float = 1.0
+    ) -> List[Detection]:
+        """
+        Run plate detection on the full frame at native street-scene scale.
+        Matches how plate models (e.g. YOLO on Kaggle plate dataset) are trained.
+        """
+        if self.plate_model is None:
+            return []
+
+        orig_h, orig_w = orig_shape
+        all_plates: List[Detection] = []
+        try:
+            results = self.plate_model(
+                infer_frame,
+                conf=0.12,
+                iou=self.iou_thresh,
+                imgsz=self.input_size,
+                device=self.device,
+                verbose=False,
+            )
+            if results and results[0].boxes is not None:
+                boxes = results[0].boxes
+                cls_list = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else []
+                conf_list = boxes.conf.cpu().numpy().astype(float) if boxes.conf is not None else []
+                xyxy_list = boxes.xyxy.cpu().numpy().astype(int) if boxes.xyxy is not None else []
+
+                for i, cls_id in enumerate(cls_list):
+                    conf = float(conf_list[i]) if i < len(conf_list) else 0.0
+                    if i >= len(xyxy_list):
+                        continue
+                    px1, py1, px2, py2 = xyxy_list[i]
+                    if scale != 1.0:
+                        inv = 1.0 / scale
+                        px1, py1, px2, py2 = int(px1 * inv), int(py1 * inv), int(px2 * inv), int(py2 * inv)
+
+                    # Add padding around plate box (15%) so character edges aren't clipped
+                    pw = px2 - px1
+                    ph = py2 - py1
+                    pad_w = int(pw * 0.15)
+                    pad_h = int(ph * 0.15)
+                    px1 = max(0, px1 - pad_w)
+                    py1 = max(0, py1 - pad_h)
+                    px2 = min(orig_w, px2 + pad_w)
+                    py2 = min(orig_h, py2 + pad_h)
+
+                    all_plates.append(
+                        Detection(
+                            track_id=-1,
+                            class_id=int(cls_id),
+                            label="license_plate",
+                            confidence=conf,
+                            bbox=(px1, py1, px2, py2),
+                            is_plate=True,
+                        )
+                    )
+        except Exception as e:
+            logger.warning(f"Full-scene plate detection error: {e}")
+
+        return all_plates
+
+    @staticmethod
+    def _associate_plates_to_vehicles(
+        vehicles: List[VehicleDetection], plates: List[Detection]
+    ):
+        """
+        Assigns detected plates to their containing vehicle by checking if the plate center
+        lies within the vehicle bounding box.
+        """
+        for plate in plates:
+            px1, py1, px2, py2 = plate.bbox
+            pcx = (px1 + px2) // 2
+            pcy = (py1 + py2) // 2
+
+            best_v = None
+            best_area = float("inf")
+            for v in vehicles:
+                vx1, vy1, vx2, vy2 = v.bbox
+                # Allow a 15px margin around vehicle bbox
+                if (vx1 - 15 <= pcx <= vx2 + 15) and (vy1 - 15 <= pcy <= vy2 + 15):
+                    v_area = (vx2 - vx1) * (vy2 - vy1)
+                    if v_area < best_area:
+                        best_area = v_area
+                        best_v = v
+
+            if best_v is not None:
+                best_v.plates.append(plate)
 
     def _detect_plates_in_crop(
         self, frame: np.ndarray, vehicle_bbox: Tuple[int, int, int, int]

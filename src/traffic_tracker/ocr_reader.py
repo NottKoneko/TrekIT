@@ -332,18 +332,30 @@ class PlateOCR:
         # Apply California format normalization (e.g. 1 Digit - 3 Letters - 3 Digits)
         normalized_merged = normalize_plate_format(merged_text) if merged_text else ""
 
-        # Check strictly for length between 5 and 8
+        # 1. Exact match with normalized plate format (e.g. 1 Digit - 3 Letters - 3 Digits)
         if normalized_merged and 5 <= len(normalized_merged) <= 8 and self._matches_plate_pattern(normalized_merged):
             return normalized_merged, round(avg_conf, 3)
 
+        # 2. Exact match with merged raw text
         if merged_text and 5 <= len(merged_text) <= 8 and self._matches_plate_pattern(merged_text):
             return merged_text, round(avg_conf, 3)
 
-        # Fallback: check if any individual candidate is valid (5-8 chars)
+        # 3. Fallback to individual candidate if it matches strict regex pattern
         for it in sorted(valid_items, key=lambda x: -x["conf"]):
             candidate = normalize_plate_format(it.get("text", "")) if it.get("text") else ""
             if candidate and 5 <= len(candidate) <= 8 and self._matches_plate_pattern(candidate):
                 return candidate, round(it["conf"], 3)
+
+        # 4. Relaxed fallback for partial / vanity / non-standard reads (3-8 alphanumeric characters)
+        if merged_text and 3 <= len(merged_text) <= 8 and merged_text.isalnum():
+            candidate = normalize_plate_format(merged_text) if len(merged_text) == 7 else merged_text
+            return candidate, round(avg_conf * 0.85, 3)
+
+        # 5. Fallback to highest confidence single alphanumeric fragment (>= 3 chars)
+        for it in sorted(valid_items, key=lambda x: -x["conf"]):
+            txt = it.get("text", "")
+            if txt and 3 <= len(txt) <= 8 and txt.isalnum():
+                return txt, round(it["conf"] * 0.80, 3)
 
         return "", 0.0
 
