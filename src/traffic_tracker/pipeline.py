@@ -384,15 +384,24 @@ class TrafficPipeline:
             elif steel_crop is not None:
                 color_lbl, color_conf = self.classifier.predict_color(steel_crop)
 
+            best_text = ""
+            best_score = 0.0
+            best_plate_det = None
+
             for plate_det in vehicle.plates:
                 plate_crop = crop_bbox(image, plate_det.bbox)
                 if plate_crop is not None:
                     text, conf = self.ocr.read(plate_crop)
-                    if text and len(text) >= 2:
-                        plate_text = text
-                        plate_conf = conf
-                        best_plate_det = plate_det
-                        break
+                    if text and len(text) >= 3:
+                        is_valid = self.ocr._matches_plate_pattern(text)
+                        score = conf * (2.5 if is_valid else (1.0 if len(text) >= 5 else 0.5))
+                        if score > best_score:
+                            best_score = score
+                            best_text = text
+                            best_plate_det = plate_det
+
+            plate_text = best_text
+            plate_conf = min(best_score, 1.0)
 
             # Draw license plate box overlay directly on the plate
             if best_plate_det is not None:

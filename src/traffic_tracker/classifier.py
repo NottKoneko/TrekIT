@@ -52,10 +52,13 @@ def _make_transform(input_size: int = 224) -> transforms.Compose:
 
 # ── Colour lookup (HSV-based fallback) ─────────────────────────────────────
 
-def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
-    """Estimate dominant vehicle body colour from HSV analysis of central region."""
+def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
+    """
+    Estimate dominant vehicle body colour from HSV analysis of central region.
+    Returns (best_color, confidence, chromatic_ratio).
+    """
     if crop_bgr is None or crop_bgr.size == 0:
-        return "Unknown", 0.0
+        return "Unknown", 0.0, 0.0
 
     h, w = crop_bgr.shape[:2]
     # Crop central region (avoid road, wheels, outer background shadows, windshields)
@@ -72,7 +75,7 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
 
     total_pixels = body_crop.shape[0] * body_crop.shape[1]
     if total_pixels == 0:
-        return "Unknown", 0.0
+        return "Unknown", 0.0, 0.0
 
     # True chromatic (vibrant color) mask requires high saturation (S >= 110)
     # Shadowed paint (S between 50 and 90) is routed to achromatic neutrals to prevent false Purple/Blue
@@ -105,6 +108,7 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
     counts["Black"] = int((achromatic_mask & (V < 50)).sum())
 
     total_chromatic = sum(counts[c] for c in ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"])
+    chromatic_ratio = float(total_chromatic / max(total_pixels, 1))
 
     # Require at least 35% chromatic pixels to consider the car a vibrant color
     if total_chromatic >= total_pixels * 0.35:
@@ -116,7 +120,7 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
         best_color = max(neutral_colors, key=lambda c: counts[c])
         conf = counts[best_color] / max(total_pixels - total_chromatic, 1)
 
-    return best_color, round(conf, 3)
+    return best_color, round(conf, 3), round(chromatic_ratio, 3)
 
 
 # ── Unified Multi-Task Network ────────────────────────────────────────────
@@ -301,10 +305,28 @@ class VehicleClassifier:
             return self.predict_attributes_probs(crop_bgr)[0]
 
         if self.color_model is not None:
-            return self._nn_predict_probs(crop_bgr, self.color_model)
+            nn_probs = self._nn_predict_probs(crop_bgr, self.color_model)
+            # Physical reflection sanity check:
+            # If NN predicts a vibrant chromatic color (e.g. Green from tree reflection on panoramic glass roof),
+            # but physical pixel statistics on sheet metal indicate < 15% chromatic pixels (85%+ neutral white/silver/grey/black),
+            # blend in the verified HSV neutral distribution to prevent glass reflection hallucinations.
+            hsv_color, hsv_conf, chromatic_ratio = _hsv_color_fallback(crop_bgr)
+            top_nn_idx = int(np.argmax(nn_probs))
+            top_nn_color = self.color_classes[top_nn_idx] if self.color_classes else ""
+            is_chromatic = top_nn_color.lower() in {
+                "red", "pink", "orange", "brown", "gold", "yellow", "green", "blue", "purple"
+            }
+
+            if is_chromatic and chromatic_ratio < 0.15 and self.color_classes:
+                lower_classes = [c.lower() for c in self.color_classes]
+                hsv_probs = np.zeros(n_classes, dtype=np.float32)
+                if hsv_color.lower() in lower_classes:
+                    hsv_probs[lower_classes.index(hsv_color.lower())] = 1.0
+                return 0.2 * nn_probs + 0.8 * hsv_probs
+            return nn_probs
 
         # Fallback to HSV histogram distribution
-        hsv_color, hsv_conf = _hsv_color_fallback(crop_bgr)
+        hsv_color, hsv_conf, _ = _hsv_color_fallback(crop_bgr)
         probs = np.ones(n_classes, dtype=np.float32) * ((1.0 - hsv_conf) / max(n_classes - 1, 1))
         if self.color_classes:
             lower_classes = [c.lower() for c in self.color_classes]
