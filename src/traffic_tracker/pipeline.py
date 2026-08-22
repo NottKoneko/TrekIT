@@ -432,9 +432,8 @@ class TrafficPipeline:
         self._records.clear()
         self._cached_plates.clear()
         self._frame_idx = 0
-        if hasattr(self.detector.model, "predictor") and self.detector.model.predictor is not None:
-            if hasattr(self.detector.model.predictor, "trackers"):
-                self.detector.model.predictor.trackers = []
+        if hasattr(self, "detector") and self.detector is not None:
+            self.detector.reset()
         logger.info("Pipeline state reset.")
 
     # ── Internal helpers ────────────────────────────────────────────────────

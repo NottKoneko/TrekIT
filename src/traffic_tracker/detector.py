@@ -255,7 +255,17 @@ class VehicleDetector:
             if not vehicle.plates:
                 vehicle.plates = self._detect_plates_in_crop(image, vehicle.bbox)
 
-        return vehicles
+    def reset(self):
+        """Reset internal frame counter and ByteTrack tracker state."""
+        self._frame_count = 0
+        self._plate_last_checked.clear()
+        if hasattr(self.model, "predictor") and self.model.predictor is not None:
+            if hasattr(self.model.predictor, "trackers"):
+                try:
+                    del self.model.predictor.trackers
+                except Exception:
+                    pass
+            self.model.predictor = None
 
     # ── Internal helpers ────────────────────────────────────────────────
 
