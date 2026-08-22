@@ -298,8 +298,18 @@ class PlateOCR:
     def _read_lprnet(self, plate_crop_bgr: np.ndarray) -> Tuple[str, float]:
         """Run dedicated LPRNet sequence model inference on plate crop."""
         try:
+            h, w = plate_crop_bgr.shape[:2]
+            # Trim top 14% (state name / "California" header / handle shadow) and bottom 10% (frame text / screw caps)
+            clean_crop = plate_crop_bgr
+            if h >= 14 and w >= 24:
+                top_cut = int(h * 0.14)
+                bot_cut = max(top_cut + 8, int(h * 0.90))
+                clean_crop = plate_crop_bgr[top_cut:bot_cut, :]
+                if clean_crop.size == 0:
+                    clean_crop = plate_crop_bgr
+
             # LPRNet expects (94, 24) input in RGB
-            img = cv2.resize(plate_crop_bgr, (94, 24), interpolation=cv2.INTER_CUBIC)
+            img = cv2.resize(clean_crop, (94, 24), interpolation=cv2.INTER_CUBIC)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = img.astype(np.float32)
             img = (img - 127.5) * 0.0078125

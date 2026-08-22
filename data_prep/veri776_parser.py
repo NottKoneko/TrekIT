@@ -63,12 +63,12 @@ VERI_TYPE_MAP = {
     2: "SUV",
     3: "Van",
     4: "Hatchback",
-    5: "Van",        # MPV / Minivan -> Van
+    5: "SUV",        # Map MPV/Crossovers -> SUV rather than Van
     6: "Truck",      # Pickup -> Truck
     7: "Truck",      # Bus / Heavy -> Truck
     8: "Truck",      # Truck -> Truck
     "sedan": "Sedan", "suv": "SUV", "van": "Van",
-    "hatchback": "Hatchback", "mpv": "Van", "pickup": "Truck",
+    "hatchback": "Hatchback", "mpv": "SUV", "pickup": "Truck",
     "bus": "Truck", "truck": "Truck", "coupe": "Coupe",
     "convertible": "Convertible",
 }
