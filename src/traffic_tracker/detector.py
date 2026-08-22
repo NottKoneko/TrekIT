@@ -90,6 +90,7 @@ class VehicleDetector:
         self.use_fp16 = self.cfg.get("fp16", True) and (self.device == "cuda" or "cuda" in str(self.device))
         self.conf_thresh = self.cfg.get("confidence_threshold", 0.45)
         self.iou_thresh = self.cfg.get("nms_iou_threshold", 0.45)
+        self.min_box_area = self.cfg.get("min_box_area", 2500)
         self.input_size = self.cfg.get("input_size", 640)
         self.vehicle_class_ids = set(self.cfg.get("vehicle_class_ids", [2, 3, 5, 7]))
         self.plate_class_id = self.cfg.get("plate_class_id", 0)
@@ -187,6 +188,12 @@ class VehicleDetector:
                 x1, y1, x2, y2 = (int(x1*inv), int(y1*inv),
                                    int(x2*inv), int(y2*inv))
 
+            # Filter out tiny distant noise / background artifacts
+            bw = max(0, x2 - x1)
+            bh = max(0, y2 - y1)
+            if bw * bh < self.min_box_area or min(bw, bh) < 30:
+                continue
+
             bbox = (int(x1), int(y1), int(x2), int(y2))
 
             vehicle = VehicleDetection(
@@ -195,6 +202,9 @@ class VehicleDetector:
                 confidence=conf,
             )
             vehicles.append(vehicle)
+
+        # Deduplicate overlapping vehicle bounding boxes
+        vehicles = self._suppress_duplicate_boxes(vehicles, iou_thresh=self.iou_thresh)
 
         # ── Full-Scene Plate Detection (Scale-Matched) ────────────────────────
         # Plate models trained on street scenes (plates 2-5% of frame) expect
@@ -241,9 +251,18 @@ class VehicleDetector:
             if i >= len(xyxy_list):
                 continue
             x1, y1, x2, y2 = xyxy_list[i]
+
+            bw = max(0, x2 - x1)
+            bh = max(0, y2 - y1)
+            if bw * bh < self.min_box_area or min(bw, bh) < 30:
+                continue
+
             bbox = (int(x1), int(y1), int(x2), int(y2))
             vehicle = VehicleDetection(track_id=-1, bbox=bbox, confidence=conf)
             vehicles.append(vehicle)
+
+        # Deduplicate overlapping vehicle bounding boxes
+        vehicles = self._suppress_duplicate_boxes(vehicles, iou_thresh=self.iou_thresh)
 
         # Full-scene plate detection
         if self.plate_model is not None and vehicles:
@@ -256,6 +275,43 @@ class VehicleDetector:
                 vehicle.plates = self._detect_plates_in_crop(image, vehicle.bbox)
 
         return vehicles
+
+    def _suppress_duplicate_boxes(
+        self, vehicles: List[VehicleDetection], iou_thresh: float = 0.45
+    ) -> List[VehicleDetection]:
+        """Merge/suppress heavily overlapping vehicle bounding boxes (keeps highest conf)."""
+        if len(vehicles) <= 1:
+            return vehicles
+
+        sorted_v = sorted(vehicles, key=lambda v: v.confidence, reverse=True)
+        kept: List[VehicleDetection] = []
+        for v in sorted_v:
+            vx1, vy1, vx2, vy2 = v.bbox
+            v_area = max(0, vx2 - vx1) * max(0, vy2 - vy1)
+            duplicate = False
+            for k in kept:
+                kx1, ky1, kx2, ky2 = k.bbox
+                k_area = max(0, kx2 - kx1) * max(0, ky2 - ky1)
+
+                inter_x1 = max(vx1, kx1)
+                inter_y1 = max(vy1, ky1)
+                inter_x2 = min(vx2, kx2)
+                inter_y2 = min(vy2, ky2)
+                inter_w = max(0, inter_x2 - inter_x1)
+                inter_h = max(0, inter_y2 - inter_y1)
+                inter_area = inter_w * inter_h
+
+                union_area = v_area + k_area - inter_area
+                iou = inter_area / max(union_area, 1)
+
+                # Overlap check or containment check
+                containment = max(inter_area / max(v_area, 1), inter_area / max(k_area, 1))
+                if iou > iou_thresh or containment > 0.80:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(v)
+        return kept
 
     def reset(self):
         """Reset internal frame counter and ByteTrack tracker state."""

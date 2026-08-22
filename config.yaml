@@ -31,8 +31,9 @@ pretrained:
 
 # ── Detection ───────────────────────────────────────────────
 detection:
-  confidence_threshold: 0.20      # Lowered to catch small/distant license plates
-  nms_iou_threshold: 0.45         # Non-max suppression IoU
+  confidence_threshold: 0.45      # Vehicle detection confidence threshold (eliminates background artifacts)
+  nms_iou_threshold: 0.45         # Non-max suppression IoU (merges duplicate boxes)
+  min_box_area: 2500              # Min bounding box area in pixels (50x50) to ignore distant noise
   input_size: 640                 # 640px / 1024px input resolution
   device: "cuda"                  # CUDA GPU (e.g. RTX 3060 12GB) or CPU
   plate_check_every_n: 1          # Check plate on every frame per track

@@ -27,7 +27,7 @@ import yaml
 
 from logging.handlers import RotatingFileHandler
 
-from .classifier import VehicleClassifier
+from .classifier import VehicleClassifier, get_body_crop
 from .detector import VehicleDetection, VehicleDetector
 from .ocr_reader import PlateOCR, estimate_sharpness
 from .utils import (
@@ -143,8 +143,8 @@ class TrafficPipeline:
         annotated, results = pipeline.process_image(image)
     """
 
-    def __init__(self, config_path: str = "config.yaml"):
-        self.config = load_config(config_path)
+    def __init__(self, config_path: str = "config.yaml", config: Optional[dict] = None):
+        self.config = config if config is not None else load_config(config_path)
         self._setup_logging()
 
         track_cfg = self.config.get("tracking", {})
@@ -370,19 +370,23 @@ class TrafficPipeline:
         records: List[VehicleRecord] = []
 
         for i, vehicle in enumerate(vehicles):
-            type_crop   = crop_bbox(image, vehicle.bbox, padding_ratio=0.10)
-            steel_crop  = _get_steel_crop(image, vehicle.bbox)
+            type_crop  = crop_bbox(image, vehicle.bbox, padding_ratio=0.08)
+            body_crop  = get_body_crop(image, vehicle.bbox)
             color_lbl, color_conf = ("Unknown", 0.0)
             type_lbl, type_conf   = ("Unknown", 0.0)
             plate_text = ""
             plate_conf = 0.0
             best_plate_det = None
 
-            if type_crop is not None:
+            if body_crop is not None:
+                color_lbl, color_conf = self.classifier.predict_color(body_crop)
+            elif type_crop is not None:
                 color_lbl, color_conf = self.classifier.predict_color(type_crop)
-                type_lbl, type_conf   = self.classifier.predict_type(type_crop)
-            elif steel_crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(steel_crop)
+
+            if type_crop is not None:
+                type_lbl, type_conf = self.classifier.predict_type(type_crop)
+            elif body_crop is not None:
+                type_lbl, type_conf = self.classifier.predict_type(body_crop)
 
             best_text = ""
             best_score = 0.0
@@ -526,3 +530,65 @@ class TrafficPipeline:
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             handlers=handlers,
         )
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Traffic Tracker AI Pipeline CLI")
+    parser.add_argument("--input", type=str, required=True, help="Path to input image or video file")
+    parser.add_argument("--output", type=str, default=None, help="Path to save annotated output")
+    parser.add_argument("--save-debug-crops", action="store_true", help="Save isolated vehicle and plate crops for inspection")
+    parser.add_argument("--conf", type=float, default=None, help="Detection confidence threshold override")
+    args = parser.parse_args()
+
+    cfg = load_config("config.yaml")
+    if args.conf is not None:
+        cfg.setdefault("detection", {})["confidence_threshold"] = args.conf
+
+    pipeline = TrafficPipeline(config=cfg)
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Error: input file {input_path} does not exist.")
+        sys.exit(1)
+
+    img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    if input_path.suffix.lower() in img_exts:
+        img_bgr = cv2.imread(str(input_path))
+        if img_bgr is None:
+            print(f"Error reading image {input_path}")
+            sys.exit(1)
+
+        annotated, records = pipeline.process_image(img_bgr)
+
+        print("\n" + "=" * 65)
+        print(f"  Traffic Tracker AI — Detection Results ({len(records)} vehicles)")
+        print("=" * 65)
+        for idx, r in enumerate(records, 1):
+            color = f"{r.color.capitalize()} ({r.color_conf:.0%})" if r.color and r.color.lower() != "unknown" else "Unknown"
+            v_type = f"{r.vehicle_type} ({r.type_conf:.0%})" if r.vehicle_type and r.vehicle_type != "Unknown" else "Unknown"
+            plate = f"{r.plate_text} ({r.plate_conf:.0%})" if r.plate_text else "None detected"
+            print(f"Vehicle #{idx:02d} | Color: {color:<16} | Type: {v_type:<16} | Plate: {plate}")
+        print("=" * 65 + "\n")
+
+        if args.output:
+            cv2.imwrite(args.output, annotated)
+            print(f"Annotated image saved to: {args.output}")
+
+        if args.save_debug_crops:
+            debug_dir = Path("logs/debug_crops")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            v_detections = pipeline.detector.detect_image(img_bgr)
+            for idx, v in enumerate(v_detections, 1):
+                v_crop = crop_bbox(img_bgr, v.bbox)
+                b_crop = get_body_crop(img_bgr, v.bbox)
+                if v_crop is not None:
+                    cv2.imwrite(str(debug_dir / f"vehicle_{idx:02d}_full.jpg"), v_crop)
+                if b_crop is not None:
+                    cv2.imwrite(str(debug_dir / f"vehicle_{idx:02d}_body.jpg"), b_crop)
+                for p_idx, p in enumerate(v.plates, 1):
+                    p_crop = crop_bbox(img_bgr, p.bbox)
+                    if p_crop is not None:
+                        cv2.imwrite(str(debug_dir / f"vehicle_{idx:02d}_plate_{p_idx}.jpg"), p_crop)
+            print(f"Debug crops saved to: {debug_dir}")

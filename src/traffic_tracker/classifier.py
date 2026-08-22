@@ -50,6 +50,33 @@ def _make_transform(input_size: int = 224) -> transforms.Compose:
     ])
 
 
+def get_body_crop(image: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    """
+    Focus on the vehicle body sheet-metal (middle-lower region),
+    stripping away windows, tinted glass roofs, tree reflections, road asphalt, and shadows.
+    """
+    if image is None or image.size == 0:
+        return None
+    x1, y1, x2, y2 = bbox
+    h, w = image.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    bh = y2 - y1
+    bw = x2 - x1
+    if bh <= 20 or bw <= 20:
+        return None
+
+    crop_y1 = int(y1 + 0.25 * bh)
+    crop_y2 = int(y2 - 0.10 * bh)
+    crop_x1 = int(x1 + 0.15 * bw)
+    crop_x2 = int(x2 - 0.15 * bw)
+
+    if crop_y2 <= crop_y1 or crop_x2 <= crop_x1:
+        return None
+    crop = image[crop_y1:crop_y2, crop_x1:crop_x2]
+    return crop if crop.size > 0 else None
+
+
 # ── Colour lookup (HSV-based fallback) ─────────────────────────────────────
 
 def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:

@@ -294,21 +294,14 @@ def process_image(image):
         if not records:
             return annotated_rgb, "ℹ️ No vehicles detected in this image."
 
-        lines = [f"**{len(records)} vehicle(s) detected:**"]
-        for r in records:
-            parts = []
-            if r.color and r.color.lower() != "unknown":
-                parts.append(f"**Color:** {r.color.capitalize()} ({r.color_conf:.0%})")
-            if r.vehicle_type and r.vehicle_type != "Unknown":
-                parts.append(f"**Type:** {r.vehicle_type} ({r.type_conf:.0%})")
-            if r.plate_text:
-                parts.append(f"**Plate:** `{r.plate_text}`")
-            if parts:
-                lines.append("- " + " | ".join(parts))
-            else:
-                lines.append(f"- Vehicle #{r.track_id}")
+        lines = [f"### 🚗 {len(records)} Vehicle(s) Detected\n"]
+        for idx, r in enumerate(records, 1):
+            color = f"{r.color.capitalize()} ({r.color_conf:.0%})" if r.color and r.color.lower() != "unknown" else "Unknown"
+            v_type = f"{r.vehicle_type} ({r.type_conf:.0%})" if r.vehicle_type and r.vehicle_type != "Unknown" else "Unknown"
+            plate = f"`{r.plate_text}` ({r.plate_conf:.0%})" if r.plate_text else "None detected"
+            lines.append(f"**Vehicle #{idx}** | **Color:** {color} | **Type:** {v_type} | **Plate:** {plate}")
 
-        return annotated_rgb, "\n".join(lines)
+        return annotated_rgb, "\n\n".join(lines)
     except Exception as e:
         logger.exception("Error during image processing:")
         return (image if isinstance(image, np.ndarray) else None), f"❌ Error processing image: {str(e)}"
