@@ -587,5 +587,5 @@ if __name__ == "__main__":
         ),
         css=CSS,
         show_error=True,
-        share=True,
+        share=False,
     )
