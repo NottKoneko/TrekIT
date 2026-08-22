@@ -280,8 +280,8 @@ class VehicleClassifier:
                     np.ones(n_t, dtype=np.float32) / max(n_t, 1),
                 )
             tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
-            if self.use_fp16:
-                with torch.cuda.amp.autocast():
+            if self.use_fp16 and self.device.type == "cuda":
+                with torch.amp.autocast("cuda"):
                     c_logits, t_logits = self.multitask_model(tensor)
             else:
                 c_logits, t_logits = self.multitask_model(tensor)
