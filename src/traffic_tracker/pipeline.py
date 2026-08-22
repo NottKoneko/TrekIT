@@ -532,6 +532,11 @@ class TrafficPipeline:
 
         color_conf = float(np.max(state.color_probs)) if state.color_probs is not None else 0.0
         type_conf  = float(np.max(state.type_probs))  if state.type_probs  is not None else 0.0
+        plate_total = sum(state.plate_votes.values())
+        plate_conf = (
+            state.plate_votes[plate_text] / max(plate_total, 1e-9)
+            if plate_text else 0.0
+        )
         # Top-K plate candidates from temporal votes
         plate_cands = [
             {"text": txt, "confidence": round(float(vote / max(plate_total, 1e-9)), 2)}
