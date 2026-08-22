@@ -426,14 +426,14 @@ class PlateOCR:
                 return text, conf
 
         # 2. EasyOCR fallback with multi-stage preprocessing
-        # Up-scale tiny crops so plate height is at least 100px for EasyOCR accuracy
+        # Up-scale tiny crops using Lanczos4 interpolation for razor-sharp character strokes
         h, w = plate_crop_bgr.shape[:2]
         if h < 100 or w < 260:
             scale = max(100.0 / max(h, 1), 260.0 / max(w, 1))
             plate_crop_bgr = cv2.resize(
                 plate_crop_bgr,
                 (int(w * scale), int(h * scale)),
-                interpolation=cv2.INTER_CUBIC,
+                interpolation=cv2.INTER_LANCZOS4,
             )
 
         processed = self._preprocess(plate_crop_bgr)
@@ -559,8 +559,8 @@ class PlateOCR:
         img = cv2.bilateralFilter(img, d=5, sigmaColor=40, sigmaSpace=40)
 
         if self.do_clahe:
-            # Clip limit 2.0 for contrast boost that preserves stroke gradients
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+            # Clip limit 1.2 and tileGridSize (2, 2) to preserve fine horizontal crossbars (e.g. on '4')
+            clahe = cv2.createCLAHE(clipLimit=1.2, tileGridSize=(2, 2))
             img = clahe.apply(img)
 
         if self.do_adaptive_thresh:
@@ -573,9 +573,9 @@ class PlateOCR:
             )
 
         if self.do_morph:
+            # Only light morphological opening (avoid closing which fuses thin strokes)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
             img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
-            img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 
         if self.do_deskew:
             img = self._deskew(img)
