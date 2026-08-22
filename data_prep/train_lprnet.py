@@ -89,43 +89,100 @@ class LPRNet(nn.Module):
         return logits.squeeze(2)   # (N, class_num, seq_len)
 
 
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+
+
 class SyntheticPlateDataset(Dataset):
     """
-    Generates synthetic US/California license plates dynamically for robust CTC sequence training.
+    Generates synthetic US/California license plates with realistic lighting,
+    embossed drop shadows, procedural state headers, bolt holes, and perspective distortion.
     """
     def __init__(self, size: int = 10000):
         self.size = size
         self.chars = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        self.font = None
+        self.small_font = None
+
+        font_candidates = [
+            "arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf",
+            "C:\\Windows\\Fonts\\arialbd.ttf", "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\calibrib.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        ]
+        for fc in font_candidates:
+            if Path(fc).exists() or os.path.exists(fc):
+                try:
+                    self.font = ImageFont.truetype(fc, size=38)
+                    self.small_font = ImageFont.truetype(fc, size=12)
+                    break
+                except Exception:
+                    pass
+        if self.font is None:
+            self.font = ImageFont.load_default()
+            self.small_font = ImageFont.load_default()
 
     def __len__(self):
         return self.size
 
     def __getitem__(self, idx):
-        # Generate random 7-character CA plate (e.g. 8XYZ123) or 6-character plate
-        if random.random() < 0.75:
+        # 1. Generate text
+        if random.random() < 0.80:
             plate_str = f"{random.choice('123456789')}{''.join(random.choices('ABCDEFGHJKLMNPQRSTUVWXYZ', k=3))}{''.join(random.choices('0123456789', k=3))}"
         else:
             plate_str = "".join(random.choices(self.chars, k=random.randint(5, 7)))
 
-        # Draw plate on image
-        img = np.ones((24, 94, 3), dtype=np.uint8) * random.randint(200, 245)
-        # Add slight noise/vignette
-        noise = np.random.randint(-15, 15, (24, 94, 3), dtype=np.int16)
-        img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        # 2. Render base plate canvas (280 x 140)
+        base_color = (random.randint(225, 250), random.randint(225, 250), random.randint(225, 250))
+        img = Image.new("RGB", (280, 140), color=base_color)
+        draw = ImageDraw.Draw(img)
 
-        # Draw characters
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.55
-        thickness = 1
-        x_offset = 6
-        for ch in plate_str:
-            cv2.putText(img, ch, (x_offset, 18), font, font_scale, (random.randint(10, 40), random.randint(10, 40), random.randint(10, 40)), thickness, cv2.LINE_AA)
-            x_offset += 12 + random.randint(-1, 1)
+        # Procedural state header (Red "CALIFORNIA" script across top margin)
+        if random.random() < 0.85:
+            header_color = (random.randint(180, 220), random.randint(20, 40), random.randint(20, 40))
+            draw.text((85, 8), "CALIFORNIA", fill=header_color, font=self.small_font)
+
+        # Random bolt holes / screw caps
+        bolt_color = (random.randint(40, 90), random.randint(40, 90), random.randint(40, 90))
+        draw.ellipse([25, 12, 35, 22], fill=bolt_color)
+        draw.ellipse([245, 12, 255, 22], fill=bolt_color)
+
+        # 3. Embossed drop shadows & main characters
+        text_color = (random.randint(15, 45), random.randint(25, 55), random.randint(70, 120))  # dark navy/black
+        shadow_color = (random.randint(100, 140), random.randint(100, 140), random.randint(100, 140))
+
+        # Calculate character spacing
+        n_chars = len(plate_str)
+        char_w = 34
+        start_x = max(15, (280 - n_chars * char_w) // 2)
+
+        for i, ch in enumerate(plate_str):
+            cx = start_x + i * char_w + random.randint(-1, 1)
+            cy = 40 + random.randint(-1, 1)
+            # Embossed drop shadow
+            draw.text((cx + 1, cy + 1), ch, fill=shadow_color, font=self.font)
+            # Main character glyph
+            draw.text((cx, cy), ch, fill=text_color, font=self.font)
+
+        # 4. Perspective warp & slight variation
+        cv_img = np.array(img)
+        h, w = cv_img.shape[:2]
+        if random.random() < 0.50:
+            dx = random.randint(2, 8)
+            dy = random.randint(2, 6)
+            src_pts = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+            dst_pts = np.float32([[dx, dy], [w - dx, 0], [w, h - dy], [0, h]])
+            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            cv_img = cv2.warpPerspective(cv_img, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+
+        # 5. Downscale to canonical (94 x 24)
+        resized = cv2.resize(cv_img, (94, 24), interpolation=cv2.INTER_AREA)
+
+        # 6. Add Gaussian noise / brightness variation
+        noise = np.random.normal(0, random.uniform(3, 8), resized.shape).astype(np.float32)
+        final_img = np.clip(resized.astype(np.float32) + noise, 0, 255)
 
         # Normalize to [-0.5, 0.5]
-        img_f = img.astype(np.float32)
-        img_f = (img_f - 127.5) * 0.0078125
-        img_t = torch.from_numpy(np.transpose(img_f, (2, 0, 1)))
+        img_f = (final_img - 127.5) * 0.0078125
+        img_t = torch.from_numpy(np.transpose(img_f, (2, 0, 1)).astype(np.float32))
 
         target = [CHAR_DICT[c] for c in plate_str if c in CHAR_DICT]
         return img_t, torch.tensor(target, dtype=torch.long), len(target)

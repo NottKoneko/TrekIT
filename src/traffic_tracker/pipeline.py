@@ -27,7 +27,7 @@ import yaml
 
 from logging.handlers import RotatingFileHandler
 
-from .classifier import VehicleClassifier, get_body_crop
+from .classifier import VehicleClassifier, get_body_crop, _hsv_color_fallback
 from .detector import VehicleDetection, VehicleDetector
 from .ocr_reader import PlateOCR, estimate_sharpness
 from .utils import (
@@ -217,13 +217,13 @@ class TrafficPipeline:
             # Check if vehicle touches frame boundaries (edge truncation)
             hf, wf = frame.shape[:2]
             vx1, vy1, vx2, vy2 = vehicle.bbox
+            bw = vx2 - vx1
+            bh = vy2 - vy1
             is_edge = (vx1 <= 8 or vy1 <= 8 or vx2 >= wf - 8 or vy2 >= hf - 8)
 
-            # 10% padding for full vehicle silhouette (captures roofline/spoiler/C-pillar)
-            type_crop = crop_bbox(frame, vehicle.bbox, padding_ratio=0.10)
-
-            # Central sheet-metal sub-crop for colour classification
-            steel_crop = _get_steel_crop(frame, vehicle.bbox)
+            # Dynamic padding: 8% padding for large vehicles (>=60x45), 0% for small/distant vehicles (<60x45)
+            pad = 0.08 if (bw >= 60 and bh >= 45) else 0.0
+            type_crop = crop_bbox(frame, vehicle.bbox, padding_ratio=pad)
 
             # Use detector plates if fresh, else fall back to cached plates
             if vehicle.plates:
@@ -232,7 +232,19 @@ class TrafficPipeline:
 
             # ── Classification (Continuous EMA probability smoothing) ───────
             if self._frame_idx % self.classify_every_n == 0:
-                if self.classifier.multitask_model is not None and type_crop is not None:
+                if bw < 60 or bh < 45:
+                    # Resolution Gate: assign default Sedan and neutral/HSV color without forcing MobileNet
+                    if state.type_probs is None and "Sedan" in self.classifier.type_classes:
+                        p_type = np.zeros(len(self.classifier.type_classes), dtype=np.float32)
+                        p_type[self.classifier.type_classes.index("Sedan")] = 0.40
+                        state.type_probs = p_type
+                    if state.color_probs is None and type_crop is not None:
+                        c_lbl, _, _ = _hsv_color_fallback(type_crop)
+                        if c_lbl in self.classifier.color_classes:
+                            p_color = np.zeros(len(self.classifier.color_classes), dtype=np.float32)
+                            p_color[self.classifier.color_classes.index(c_lbl)] = 0.50
+                            state.color_probs = p_color
+                elif self.classifier.multitask_model is not None and type_crop is not None:
                     # Single forward pass for both color and type
                     p_color, p_type = self.classifier.predict_attributes_probs(type_crop)
                     alpha_c = self.ema_alpha if not is_edge else 0.05
@@ -370,20 +382,35 @@ class TrafficPipeline:
         records: List[VehicleRecord] = []
 
         for i, vehicle in enumerate(vehicles):
-            type_crop  = crop_bbox(image, vehicle.bbox, padding_ratio=0.08)
-            body_crop  = get_body_crop(image, vehicle.bbox)
+            vx1, vy1, vx2, vy2 = vehicle.bbox
+            bw = vx2 - vx1
+            bh = vy2 - vy1
+
+            # Dynamic padding: 8% for >=60x45, 0% for <60x45 to prevent foliage bleed
+            pad = 0.08 if (bw >= 60 and bh >= 45) else 0.0
+            type_crop  = crop_bbox(image, vehicle.bbox, padding_ratio=pad)
+            body_crop  = get_body_crop(image, vehicle.bbox) if (bw >= 60 and bh >= 45) else None
             color_lbl, color_conf = ("Unknown", 0.0)
             type_lbl, type_conf   = ("Unknown", 0.0)
             plate_text = ""
             plate_conf = 0.0
             best_plate_det = None
 
-            if type_crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(type_crop)
-                type_lbl, type_conf   = self.classifier.predict_type(type_crop)
-            elif body_crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(body_crop)
-                type_lbl, type_conf   = self.classifier.predict_type(body_crop)
+            # Resolution Gate: If < 60x45, bypass MobileNet and assign Sedan + HSV/neutral color fallback
+            if bw < 60 or bh < 45:
+                type_lbl, type_conf = "Sedan", 0.40
+                if type_crop is not None:
+                    c_lbl, c_conf, _ = _hsv_color_fallback(type_crop)
+                    color_lbl, color_conf = (c_lbl if c_lbl != "Unknown" else "Grey"), max(c_conf, 0.40)
+                else:
+                    color_lbl, color_conf = "Grey", 0.40
+            else:
+                if type_crop is not None:
+                    color_lbl, color_conf = self.classifier.predict_color(type_crop)
+                    type_lbl, type_conf   = self.classifier.predict_type(type_crop)
+                elif body_crop is not None:
+                    color_lbl, color_conf = self.classifier.predict_color(body_crop)
+                    type_lbl, type_conf   = self.classifier.predict_type(body_crop)
 
             best_text = ""
             best_score = 0.0

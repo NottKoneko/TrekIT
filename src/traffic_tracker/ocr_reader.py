@@ -61,18 +61,32 @@ US_STATE_HEADERS = {
 def normalize_plate_format(text: str) -> str:
     """
     Applies California & standard US 7-character plate format disambiguation.
-    Standard Format: 1 Digit - 3 Letters - 3 Digits (e.g. 9JWM255, 8MZW276, 1ABC123)
+    Standard Format: 1 Digit - 3 Letters - 3 Digits (e.g. 9GAD429, 9JWM255, 8MZW276, 1ABC123)
     """
     if not text:
         return ""
 
-    if len(text) != 7:
-        return text
+    clean = re.sub(r"[^A-Z0-9]", "", text.upper())
+    if len(clean) != 7:
+        return clean
 
-    DIGIT_MAP = {'O': '0', 'Q': '0', 'I': '1', 'L': '1', 'Z': '2', 'A': '4', 'S': '5', 'G': '6', 'B': '8'}
-    LETTER_MAP = {'0': 'O', '1': 'I', '2': 'Z', '4': 'A', '5': 'S', '6': 'G', '8': 'B'}
+    DIGIT_MAP = {
+        'O': '0', 'D': '0', 'Q': '0',
+        'I': '1', 'L': '1', 'T': '1',
+        'Z': '2',
+        'A': '4',
+        'S': '5',
+        'G': '6', 'C': '6',
+        'B': '8',
+        'J': '9',
+    }
+    LETTER_MAP = {
+        '0': 'O', '1': 'I', '2': 'Z',
+        '4': 'A', '5': 'S', '6': 'G',
+        '8': 'B', '9': 'J',
+    }
 
-    chars = list(text)
+    chars = list(clean)
 
     # Position 0 must be a digit
     if chars[0] in DIGIT_MAP:

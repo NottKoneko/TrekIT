@@ -211,6 +211,37 @@ def organize_veri_imagefolder(veri_dir: Path, output_dir: Path = Path("data/veri
     return color_root, type_root
 
 
+def parse_western_cctv_crops(extra_dirs: List[Path]) -> List[Tuple[Path, int, int]]:
+    """
+    Parses Western CCTV surveillance crops from BDD100K, BoxCars116k, or MIO-TCD
+    and maps them to standard TREKIT_COLORS and TREKIT_TYPES.
+    """
+    extra_samples = []
+    type_to_idx = {t.lower(): i for i, t in enumerate(TREKIT_TYPES)}
+
+    for edir in extra_dirs:
+        if not edir.exists():
+            continue
+        for type_subdir in edir.iterdir():
+            if type_subdir.is_dir():
+                type_name = type_subdir.name.lower()
+                matched_type_idx = None
+                for t_name, t_idx in type_to_idx.items():
+                    if t_name in type_name or type_name in t_name:
+                        matched_type_idx = t_idx
+                        break
+                if matched_type_idx is None:
+                    matched_type_idx = type_to_idx.get("sedan", 4)
+
+                for img_p in list(type_subdir.glob("*.jpg")) + list(type_subdir.glob("*.png")):
+                    c_idx = TREKIT_COLORS.index("grey") if "grey" in TREKIT_COLORS else 6
+                    extra_samples.append((img_p, c_idx, matched_type_idx))
+
+    if extra_samples:
+        logger.info(f"Loaded {len(extra_samples)} Western surveillance crops from extra datasets.")
+    return extra_samples
+
+
 def train_vehicle_attribute_net(
     data_dir: str = "data/veri776",
     epochs: int = 30,
@@ -220,10 +251,16 @@ def train_vehicle_attribute_net(
     output_path: str = "models/vehicle_attributes.pt",
 ):
     """
-    Trains the multi-task VehicleAttributeNet and saves the weights.
+    Trains the multi-task VehicleAttributeNet on combined VeRi-776 and Western CCTV surveillance crops.
     """
     veri_path = Path(data_dir)
     samples = parse_veri776(veri_path)
+
+    # Ingest Western surveillance crops if available
+    extra_dirs = [Path("data/bdd100k_subset"), Path("data/boxcars116k"), Path("data/miotcd_cctv_subset")]
+    western_samples = parse_western_cctv_crops(extra_dirs)
+    samples.extend(western_samples)
+
     if not samples:
         logger.warning(f"No samples found in {data_dir}.")
         return

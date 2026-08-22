@@ -213,6 +213,84 @@ def download_miotcd_cctv_subset() -> str:
         return ""
 
 
+# ── 4. BoxCars116k / BDD100k Western Surveillance Datasets ───────────────
+BOXCARS_OUTPUT_DIR = BASE_DIR / "boxcars116k"
+
+def download_boxcars116k_dataset() -> str:
+    """
+    Download the BoxCars116k Western surveillance dataset (alxmamaev/boxcars116k) via kagglehub.
+    Features 116,284 high-angle street and highway CCTV vehicle captures.
+    """
+    try:
+        import kagglehub
+    except ImportError:
+        logger.error("kagglehub not installed. Run: pip install kagglehub")
+        return ""
+
+    logger.info("Downloading BoxCars116k Western surveillance dataset from Kaggle...")
+    try:
+        path = kagglehub.dataset_download("alxmamaev/boxcars116k")
+        logger.info(f"BoxCars116k dataset saved to: {path}")
+        return str(path)
+    except Exception as e:
+        logger.warning(f"Could not download BoxCars116k: {e}")
+        return ""
+
+
+def download_bdd100k_subset(max_samples: int = 2000) -> str:
+    """
+    Stream and extract Western highway driving vehicle crops from BDD100K via Hugging Face.
+    """
+    bdd_dir = BASE_DIR / "bdd100k_subset"
+    bdd_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from datasets import load_dataset
+        from PIL import Image as PILImage
+        from tqdm import tqdm
+        logger.info(f"Streaming BDD100K driving dataset subset (cap: {max_samples} crops)...")
+        ds = load_dataset("keremberke/bdd100k-object-detection", split="train", streaming=True)
+        saved = 0
+        pbar = tqdm(desc="Saving BDD100K crops", total=max_samples, unit="img")
+        for sample in ds:
+            img = sample.get("image")
+            objects = sample.get("objects", {})
+            bboxes = objects.get("bbox", [])
+            categories = objects.get("category", [])
+            if img is None:
+                continue
+            w, h = img.size
+            for bbox, cat in zip(bboxes, categories):
+                # Map BDD categories (car, truck, bus)
+                cat_str = str(cat).lower()
+                target_type = "Sedan"
+                if "truck" in cat_str:
+                    target_type = "Truck"
+                elif "bus" in cat_str:
+                    target_type = "Truck"
+                elif "suv" in cat_str or "van" in cat_str:
+                    target_type = "SUV"
+
+                # Extract crop
+                bx, by, bw, bh = bbox
+                if bw >= 50 and bh >= 40:
+                    crop = img.crop((bx, by, bx + bw, by + bh))
+                    out_dir = bdd_dir / target_type
+                    out_dir.mkdir(exist_ok=True, parents=True)
+                    crop.save(out_dir / f"bdd_{saved:06d}.jpg", quality=90)
+                    saved += 1
+                    pbar.update(1)
+                    if saved >= max_samples:
+                        break
+            if saved >= max_samples:
+                break
+        pbar.close()
+        logger.info(f"BDD100K subset ready: {saved} crops at {bdd_dir}")
+        return str(bdd_dir)
+    except Exception as e:
+        logger.warning(f"Could not stream BDD100K: {e}")
+        return ""
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
