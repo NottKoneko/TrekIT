@@ -62,7 +62,7 @@ def records_to_df(records: list) -> pd.DataFrame:
     if not records:
         return pd.DataFrame(columns=[
             "Track ID", "Plate", "Plate Conf", "Color", "Color Conf",
-            "Type", "Type Conf", "First Frame", "Last Frame", "Time",
+            "Type", "Type Conf", "Orientation", "First Frame", "Last Frame", "Time",
         ])
     rows = []
     for r in records:
@@ -74,6 +74,7 @@ def records_to_df(records: list) -> pd.DataFrame:
             "Color Conf": f"{r.color_conf:.0%}",
             "Type": r.vehicle_type,
             "Type Conf": f"{r.type_conf:.0%}",
+            "Orientation": getattr(r, "orientation", "Rear"),
             "First Frame": r.frame_first_seen,
             "Last Frame": r.frame_last_seen,
             "Time": r.timestamp,
@@ -299,7 +300,7 @@ def process_image(image):
             color = f"{r.color.capitalize()} ({r.color_conf:.0%})" if r.color and r.color.lower() != "unknown" else "Unknown"
             v_type = f"{r.vehicle_type} ({r.type_conf:.0%})" if r.vehicle_type and r.vehicle_type != "Unknown" else "Unknown"
             plate = f"`{r.plate_text}` ({r.plate_conf:.0%})" if r.plate_text else "None detected"
-            lines.append(f"**Vehicle #{idx}** | **Color:** {color} | **Type:** {v_type} | **Plate:** {plate}")
+            lines.append(f"**Vehicle #{idx}** | **Color:** {color} | **Type:** {v_type} | **Orientation:** {getattr(r, 'orientation', 'Rear')} | **Plate:** {plate}")
 
         return annotated_rgb, "\n\n".join(lines)
     except Exception as e:

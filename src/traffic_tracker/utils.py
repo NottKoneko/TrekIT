@@ -195,7 +195,95 @@ def draw_fps(frame: np.ndarray, fps: float) -> np.ndarray:
     (tw, th), _ = cv2.getTextSize(text, font, 0.55, 1)
     x = frame.shape[1] - tw - 10
     cv2.putText(frame, text, (x, 22), font, 0.55, (0, 255, 180), 1, cv2.LINE_AA)
-    return frame
+# ── Image Quality & Homography Utilities ───────────────────────────────────
+
+def assess_image_quality(img_bgr: np.ndarray) -> Tuple[float, float, float]:
+    """
+    Computes image sharpness and exposure quality metrics.
+    
+    Returns:
+        (laplacian_var, normalized_sharpness, luminance_balance)
+        - laplacian_var: Q_sharpness = Var(nabla^2 I)
+        - normalized_sharpness: Q_tilde in [0.0, 1.0]
+        - luminance_balance: balance score in [0.0, 1.0] (1.0 = perfectly exposed)
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return 0.0, 0.0, 0.0
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if len(img_bgr.shape) == 3 else img_bgr
+    laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    normalized_sharpness = min(1.0, max(0.0, laplacian_var / 180.0))
+
+    mean_lum = float(np.mean(gray))
+    luminance_balance = max(0.0, 1.0 - abs(mean_lum - 128.0) / 128.0)
+
+    return round(laplacian_var, 2), round(normalized_sharpness, 3), round(luminance_balance, 3)
+
+
+def rectify_plate_quad(
+    image: np.ndarray,
+    corner_pts: np.ndarray,
+    target_size: Tuple[int, int] = (94, 24),
+) -> Optional[np.ndarray]:
+    """
+    Rectifies an oriented 4-point quadrilateral plate crop into a canonical frontal plane.
+    
+    Args:
+        image: Full frame or ROI image (BGR).
+        corner_pts: Array of shape (4, 2) with quadrilateral corner coordinates (x, y).
+        target_size: (width, height) of rectified canonical output.
+        
+    Returns:
+        Rectified warped plate image of shape (height, width, 3) or None.
+    """
+    if image is None or image.size == 0 or corner_pts is None or len(corner_pts) != 4:
+        return None
+
+    pts = np.array(corner_pts, dtype="float32")
+    # Order points: top-left, top-right, bottom-right, bottom-left
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1)
+    ordered = np.zeros((4, 2), dtype="float32")
+    ordered[0] = pts[np.argmin(s)]       # top-left
+    ordered[2] = pts[np.argmax(s)]       # bottom-right
+    ordered[1] = pts[np.argmin(diff)]    # top-right
+    ordered[3] = pts[np.argmax(diff)]    # bottom-left
+
+    tw, th = target_size
+    dst = np.array([[0, 0], [tw - 1, 0], [tw - 1, th - 1], [0, th - 1]], dtype="float32")
+
+    try:
+        M = cv2.getPerspectiveTransform(ordered, dst)
+        warped = cv2.warpPerspective(image, M, (tw, th), flags=cv2.INTER_LANCZOS4)
+        return warped if warped is not None and warped.size > 0 else None
+    except Exception:
+        return None
+
+
+def score_plate_keyframe(
+    conf_det: float,
+    crop_bgr: np.ndarray,
+    frame_shape: Tuple[int, int],
+    plate_bbox: Tuple[int, int, int, int],
+) -> float:
+    """
+    Computes quality-weighted keyframe rank score:
+    Q = 0.4 * conf_det + 0.4 * Q_tilde_sharpness + 0.2 * (area_plate / area_frame)
+    """
+    if crop_bgr is None or crop_bgr.size == 0:
+        return 0.0
+
+    _, q_sharp, _ = assess_image_quality(crop_bgr)
+    
+    hf, wf = frame_shape[:2]
+    frame_area = max(1.0, float(hf * wf))
+    
+    px1, py1, px2, py2 = plate_bbox
+    plate_area = max(0.0, float((px2 - px1) * (py2 - py1)))
+    area_ratio = min(1.0, (plate_area / frame_area) * 100.0)  # Scale up ratio (typical plate is 0.5-2% of frame)
+
+    q_score = 0.4 * float(conf_det) + 0.4 * q_sharp + 0.2 * area_ratio
+    return round(float(q_score), 4)
 
 
 # ── Crop utilities ─────────────────────────────────────────────────────────

@@ -1,22 +1,14 @@
 """
 classifier.py
 -------------
-MobileNetV3-Large classifier for vehicle color and body type.
-
-Two separate single-task models (color, type) — simpler and more reliable
-than multi-task on limited training data.
-
-Fallback behaviour (before Colab training):
-  - Color: HSV-histogram KNN classifier (no neural net needed)
-  - Body type: returns "Unknown" — requires fine-tuned weights
-
-NOTE: Training notebook uses MobileNetV3-Large. This file MUST stay in sync.
+Multi-Head Vehicle Classifier for Color, Body Type, and View Orientation.
+Supports PyTorch (CUDA FP16 / CPU) and ONNX Runtime acceleration with batched inference.
 """
 
 import logging
 from collections import Counter
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -26,6 +18,8 @@ from PIL import Image
 from torchvision import models, transforms
 
 logger = logging.getLogger(__name__)
+
+ORIENTATION_CLASSES = ["Rear", "Front", "Side/Angle"]
 
 
 def preprocess_crop(crop_bgr: np.ndarray, target_size: Tuple[int, int] = (224, 224)) -> Optional[Image.Image]:
@@ -40,7 +34,6 @@ def preprocess_crop(crop_bgr: np.ndarray, target_size: Tuple[int, int] = (224, 2
     return Image.fromarray(crop_rgb)
 
 
-# ── Transform used for all MobileNetV3 inference ───────────────────────────
 def _make_transform(input_size: int = 224) -> transforms.Compose:
     return transforms.Compose([
         transforms.Resize((input_size, input_size)),
@@ -77,8 +70,6 @@ def get_body_crop(image: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optiona
     return crop if crop.size > 0 else None
 
 
-# ── Colour lookup (HSV-based fallback) ─────────────────────────────────────
-
 def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
     """
     Estimate dominant vehicle body colour from HSV analysis of central region.
@@ -88,7 +79,6 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
         return "Unknown", 0.0, 0.0
 
     h, w = crop_bgr.shape[:2]
-    # Crop central region (avoid road, wheels, outer background shadows, windshields)
     margin_h = int(h * 0.20)
     margin_w = int(w * 0.20)
     body_crop = crop_bgr[margin_h:max(margin_h + 1, h - margin_h), margin_w:max(margin_w + 1, w - margin_w)]
@@ -104,8 +94,6 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
     if total_pixels == 0:
         return "Unknown", 0.0, 0.0
 
-    # True chromatic (vibrant color) mask requires high saturation (S >= 110)
-    # Shadowed paint (S between 50 and 90) is routed to achromatic neutrals to prevent false Purple/Blue
     chromatic_mask = (S >= 110) & (V >= 50)
     achromatic_mask = ~chromatic_mask
 
@@ -115,7 +103,6 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
         "Red": 0, "Silver": 0, "Tan": 0, "White": 0, "Yellow": 0,
     }
 
-    # Chromatic classification by Hue & Value (strictly S >= 110)
     counts["Red"] = int((chromatic_mask & (((H >= 0) & (H <= 10)) | ((H >= 165) & (H <= 180)))).sum())
     counts["Pink"] = int((chromatic_mask & (H > 150) & (H < 165) & (V >= 130)).sum())
     counts["Orange"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V >= 130))).sum())
@@ -126,7 +113,6 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
     counts["Blue"] = int((chromatic_mask & ((H > 85) & (H <= 140))).sum())
     counts["Purple"] = int((chromatic_mask & ((H > 140) & (H <= 160))).sum())
 
-    # Achromatic / Neutral classification (all S < 110 pixels)
     counts["White"] = int((achromatic_mask & (V >= 185) & (S <= 45)).sum())
     counts["Silver"] = int((achromatic_mask & (V >= 125) & (V < 185) & (S <= 45)).sum())
     counts["Beige"] = int((achromatic_mask & (V >= 135) & (S > 45) & (H >= 15) & (H <= 40)).sum())
@@ -137,7 +123,6 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
     total_chromatic = sum(counts[c] for c in ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"])
     chromatic_ratio = float(total_chromatic / max(total_pixels, 1))
 
-    # Require at least 35% chromatic pixels to consider the car a vibrant color
     if total_chromatic >= total_pixels * 0.35:
         chromatic_colors = ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"]
         best_color = max(chromatic_colors, key=lambda c: counts[c])
@@ -150,49 +135,10 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float, float]:
     return best_color, round(conf, 3), round(chromatic_ratio, 3)
 
 
-# ── Unified Multi-Task Network ────────────────────────────────────────────
 class VehicleAttributeNet(nn.Module):
     """
-    Unified Multi-Task Network for vehicle color (15 classes) and body type (7 classes).
-    Uses a shared MobileNetV3-Large backbone and two specialized classification heads.
-    """
-    def __init__(self, n_colors: int = 15, n_types: int = 7, pretrained: bool = False):
-        super().__init__()
-        weights = models.MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
-        base = models.mobilenet_v3_large(weights=weights)
-        self.features = base.features
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        in_feat = 960  # MobileNetV3-Large output feature channels
-
-        self.color_head = nn.Sequential(
-            nn.Linear(in_feat, 256),
-            nn.Hardswish(),
-            nn.Dropout(0.2),
-            nn.Linear(256, n_colors),
-        )
-        self.type_head = nn.Sequential(
-            nn.Linear(in_feat, 256),
-            nn.Hardswish(),
-            nn.Dropout(0.2),
-            nn.Linear(256, n_types),
-        )
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        feat = self.features(x)
-        feat = self.pool(feat)
-        feat = torch.flatten(feat, 1)
-        color_logits = self.color_head(feat)
-        type_logits = self.type_head(feat)
-        return color_logits, type_logits
-
-
-ORIENTATION_CLASSES = ["Rear", "Front", "Side/Unknown"]
-
-
-class ExtendedVehicleAttributeNet(nn.Module):
-    """
-    Multi-Task MobileNetV3 predicting Color (15 classes), Body Type (7 classes),
-    and View Orientation (Rear, Front, Side/Unknown).
+    Unified Multi-Task Network for vehicle color (15 classes), body type (7 classes),
+    and view orientation (3 classes).
     """
     def __init__(self, n_colors: int = 15, n_types: int = 7, n_orientations: int = 3, pretrained: bool = False):
         super().__init__()
@@ -228,38 +174,13 @@ class ExtendedVehicleAttributeNet(nn.Module):
         return self.color_head(feat), self.type_head(feat), self.orientation_head(feat)
 
 
-# ── MobileNetV3 Builders (Single-Task Legacy) ──────────────────────────────
-def _build_mobilenet_large(num_classes: int) -> nn.Module:
-    """Build a MobileNetV3-Large model."""
-    base = models.mobilenet_v3_large(
-        weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2
-    )
-    in_features = base.classifier[-1].in_features
-    base.classifier[-1] = nn.Linear(in_features, num_classes)
-    return base
+ExtendedVehicleAttributeNet = VehicleAttributeNet  # Backward-compatible alias
 
 
-def _build_mobilenet_small(num_classes: int) -> nn.Module:
-    """Build a MobileNetV3-Small model."""
-    base = models.mobilenet_v3_small(
-        weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1
-    )
-    in_features = base.classifier[-1].in_features
-    base.classifier[-1] = nn.Linear(in_features, num_classes)
-    return base
-
-
-# ── Public classifier class ─────────────────────────────────────────────────
 class VehicleClassifier:
     """
-    Classifies vehicle color (15 classes) and body type (7 classes).
-    Supports unified multi-task network (VehicleAttributeNet) or legacy dual models.
-
-    Usage:
-        clf = VehicleClassifier(config)
-        color_probs, type_probs = clf.predict_attributes_probs(crop_bgr)
-        color_probs = clf.predict_color_probs(crop_bgr)
-        type_probs  = clf.predict_type_probs(crop_bgr)
+    Production Multi-Head Vehicle Classifier (Color, Type, Orientation).
+    Supports ONNX Runtime and PyTorch with batch processing.
     """
 
     def __init__(self, config: dict):
@@ -268,14 +189,13 @@ class VehicleClassifier:
         self.input_size = self.cfg_clf.get("input_size", 224)
         self.conf_cutoff = self.cfg_clf.get("confidence_cutoff", 0.35)
 
-        # Default class lists — must EXACTLY match the JSON files in alphabetical order
         self.color_classes = [
             "Beige", "Black", "Blue", "Brown", "Gold", "Green", "Grey",
             "Orange", "Pink", "Purple", "Red", "Silver", "Tan", "White", "Yellow",
         ]
         self.type_classes = ["Convertible", "Coupe", "Hatchback", "SUV", "Sedan", "Truck", "Van"]
+        self.orientation_classes = ORIENTATION_CLASSES
 
-        # Try loading exact class names from JSON files if present
         models_dir = Path(self.cfg_paths.get("models_dir", "models"))
         color_json = models_dir / "color_classes.json"
         type_json = models_dir / "type_classes.json"
@@ -306,199 +226,181 @@ class VehicleClassifier:
         self.use_fp16 = (self.device.type == "cuda")
         self.transform = _make_transform(self.input_size)
 
-        # 1. Attempt to load unified multi-task attribute network
-        multi_task_path = self.cfg_paths.get("vehicle_attributes_weights", str(models_dir / "vehicle_attributes.pt"))
-        self.multitask_model: Optional[VehicleAttributeNet] = self._load_multitask_model(multi_task_path)
+        # ── ONNX Session Initialization ─────────────────────────────────────
+        self.ort_session = None
+        onnx_path = self.cfg_paths.get("vehicle_attributes_onnx", str(models_dir / "vehicle_attributes.onnx"))
+        if Path(onnx_path).exists():
+            self.ort_session = self._init_onnx_session(onnx_path)
 
-        # 2. If no multi-task model, load legacy dual models
-        self.color_model: Optional[nn.Module] = None
-        self.type_model: Optional[nn.Module] = None
-        if self.multitask_model is None:
-            self.color_model = self._load_model(
-                self.cfg_paths.get("color_weights", ""),
-                len(self.color_classes),
-                "color",
-            )
-            self.type_model = self._load_model(
-                self.cfg_paths.get("type_weights", ""),
-                len(self.type_classes),
-                "type",
-            )
+        # ── PyTorch Multi-Task Model Fallback ────────────────────────────────
+        self.multitask_model: Optional[VehicleAttributeNet] = None
+        if self.ort_session is None:
+            multi_task_path = self.cfg_paths.get("vehicle_attributes_weights", str(models_dir / "vehicle_attributes.pt"))
+            self.multitask_model = self._load_multitask_model(multi_task_path)
 
-    # ── Probability distribution API (for continuous EMA smoothing) ─────
+    def _init_onnx_session(self, onnx_path: str):
+        """Initializes ONNX Runtime session with hardware acceleration providers."""
+        try:
+            import onnxruntime as ort
+            avail = ort.get_available_providers()
+            providers = []
+            if "CUDAExecutionProvider" in avail and torch.cuda.is_available():
+                providers.append("CUDAExecutionProvider")
+            if "TensorrtExecutionProvider" in avail and torch.cuda.is_available():
+                providers.append("TensorrtExecutionProvider")
+            providers.append("CPUExecutionProvider")
+
+            session = ort.InferenceSession(onnx_path, providers=providers)
+            logger.info(f"Loaded ONNX VehicleAttributeNet from {onnx_path} (Providers: {session.get_providers()})")
+            return session
+        except Exception as e:
+            logger.warning(f"Could not initialize ONNX session for {onnx_path}: {e}")
+            return None
 
     @torch.no_grad()
-    def predict_attributes_probs(self, crop_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def predict_attributes_probs(
+        self, crop_bgr: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Run a single forward pass through the unified multi-task network.
-        Returns (color_probs, type_probs) simultaneously.
+        Runs forward inference on a single crop.
+        Returns: (color_probs, type_probs, orientation_probs)
         """
-        n_c = len(self.color_classes)
-        n_t = len(self.type_classes)
+        n_c, n_t, n_o = len(self.color_classes), len(self.type_classes), len(self.orientation_classes)
         if crop_bgr is None or crop_bgr.size == 0:
             return (
                 np.ones(n_c, dtype=np.float32) / max(n_c, 1),
                 np.ones(n_t, dtype=np.float32) / max(n_t, 1),
+                np.ones(n_o, dtype=np.float32) / max(n_o, 1),
             )
 
+        c_probs_b, t_probs_b, o_probs_b = self.predict_attributes_batch([crop_bgr])
+        return c_probs_b[0], t_probs_b[0], o_probs_b[0]
+
+    @torch.no_grad()
+    def predict_attributes_batch(
+        self, crops_bgr: List[np.ndarray]
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Runs batched forward inference on a list of BGR crops [B, 3, 224, 224].
+        Returns: (batch_color_probs, batch_type_probs, batch_orientation_probs)
+        """
+        n_c, n_t, n_o = len(self.color_classes), len(self.type_classes), len(self.orientation_classes)
+        batch_size = len(crops_bgr)
+        if batch_size == 0:
+            return (
+                np.zeros((0, n_c), dtype=np.float32),
+                np.zeros((0, n_t), dtype=np.float32),
+                np.zeros((0, n_o), dtype=np.float32),
+            )
+
+        # Build tensor batch
+        tensors = []
+        valid_indices = []
+        for i, crop in enumerate(crops_bgr):
+            if crop is not None and crop.size > 0:
+                pil_img = preprocess_crop(crop)
+                if pil_img is not None:
+                    tensors.append(self.transform(pil_img))
+                    valid_indices.append(i)
+
+        if not tensors:
+            return (
+                np.ones((batch_size, n_c), dtype=np.float32) / max(n_c, 1),
+                np.ones((batch_size, n_t), dtype=np.float32) / max(n_t, 1),
+                np.ones((batch_size, n_o), dtype=np.float32) / max(n_o, 1),
+            )
+
+        batch_tensor = torch.stack(tensors)
+
+        # 1. ONNX Runtime Path
+        if self.ort_session is not None:
+            try:
+                ort_inputs = {self.ort_session.get_inputs()[0].name: batch_tensor.numpy()}
+                ort_outs = self.ort_session.run(None, ort_inputs)
+                
+                # Softmax conversion
+                def _softmax(x):
+                    e = np.exp(x - np.max(x, axis=-1, keepdims=True))
+                    return e / np.sum(e, axis=-1, keepdims=True)
+
+                c_probs = _softmax(ort_outs[0])
+                t_probs = _softmax(ort_outs[1])
+                o_probs = _softmax(ort_outs[2]) if len(ort_outs) > 2 else np.full((len(valid_indices), n_o), 1.0 / n_o, dtype=np.float32)
+                
+                out_c = np.ones((batch_size, n_c), dtype=np.float32) / max(n_c, 1)
+                out_t = np.ones((batch_size, n_t), dtype=np.float32) / max(n_t, 1)
+                out_o = np.ones((batch_size, n_o), dtype=np.float32) / max(n_o, 1)
+                for vi, src_idx in enumerate(valid_indices):
+                    out_c[src_idx] = c_probs[vi]
+                    out_t[src_idx] = t_probs[vi]
+                    out_o[src_idx] = o_probs[vi]
+                return out_c, out_t, out_o
+            except Exception as e:
+                logger.debug(f"ONNX batch inference failed: {e}")
+
+        # 2. PyTorch Path
         if self.multitask_model is not None:
-            pil_img = preprocess_crop(crop_bgr)
-            if pil_img is None:
-                return (
-                    np.ones(n_c, dtype=np.float32) / max(n_c, 1),
-                    np.ones(n_t, dtype=np.float32) / max(n_t, 1),
-                )
-            tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
+            batch_tensor = batch_tensor.to(self.device)
             if self.use_fp16 and self.device.type == "cuda":
                 with torch.amp.autocast("cuda"):
-                    c_logits, t_logits = self.multitask_model(tensor)
+                    outs = self.multitask_model(batch_tensor)
             else:
-                c_logits, t_logits = self.multitask_model(tensor)
+                outs = self.multitask_model(batch_tensor)
 
-            c_probs = torch.softmax(c_logits.float(), dim=1)[0].cpu().numpy()
-            t_probs = torch.softmax(t_logits.float(), dim=1)[0].cpu().numpy()
-            return c_probs, t_probs
+            c_logits, t_logits = outs[0], outs[1]
+            o_logits = outs[2] if len(outs) > 2 else None
 
-        # Fallback to separate models or heuristics
-        return self.predict_color_probs(crop_bgr), self.predict_type_probs(crop_bgr)
+            c_probs = torch.softmax(c_logits.float(), dim=1).cpu().numpy()
+            t_probs = torch.softmax(t_logits.float(), dim=1).cpu().numpy()
+            o_probs = torch.softmax(o_logits.float(), dim=1).cpu().numpy() if o_logits is not None else np.full((len(valid_indices), n_o), 1.0 / n_o, dtype=np.float32)
 
-    # ── Probability distribution API (for continuous EMA smoothing) ─────
+            out_c = np.ones((batch_size, n_c), dtype=np.float32) / max(n_c, 1)
+            out_t = np.ones((batch_size, n_t), dtype=np.float32) / max(n_t, 1)
+            out_o = np.ones((batch_size, n_o), dtype=np.float32) / max(n_o, 1)
+            for vi, src_idx in enumerate(valid_indices):
+                out_c[src_idx] = c_probs[vi]
+                out_t[src_idx] = t_probs[vi]
+                out_o[src_idx] = o_probs[vi]
+            return out_c, out_t, out_o
+
+        # Heuristic fallback
+        out_c = np.ones((batch_size, n_c), dtype=np.float32) / max(n_c, 1)
+        out_t = np.ones((batch_size, n_t), dtype=np.float32) / max(n_t, 1)
+        out_o = np.ones((batch_size, n_o), dtype=np.float32) / max(n_o, 1)
+        return out_c, out_t, out_o
 
     def predict_color_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
-        """Return a 1D probability distribution over color_classes."""
-        n_classes = len(self.color_classes) if self.color_classes is not None else 15
-        if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
-            return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
-
-        if self.multitask_model is not None:
-            return self.predict_attributes_probs(crop_bgr)[0]
-
-        if self.color_model is not None:
-            nn_probs = self._nn_predict_probs(crop_bgr, self.color_model)
-            # Physical reflection sanity check:
-            # If NN predicts a vibrant chromatic color (e.g. Green from tree reflection on panoramic glass roof),
-            # but physical pixel statistics on sheet metal indicate < 15% chromatic pixels (85%+ neutral white/silver/grey/black),
-            # blend in the verified HSV neutral distribution to prevent glass reflection hallucinations.
-            hsv_color, hsv_conf, chromatic_ratio = _hsv_color_fallback(crop_bgr)
-            top_nn_idx = int(np.argmax(nn_probs))
-            top_nn_color = self.color_classes[top_nn_idx] if self.color_classes else ""
-            is_chromatic = top_nn_color.lower() in {
-                "red", "pink", "orange", "brown", "gold", "yellow", "green", "blue", "purple"
-            }
-
-            if is_chromatic and chromatic_ratio < 0.15 and self.color_classes:
-                lower_classes = [c.lower() for c in self.color_classes]
-                hsv_probs = np.zeros(n_classes, dtype=np.float32)
-                if hsv_color.lower() in lower_classes:
-                    hsv_probs[lower_classes.index(hsv_color.lower())] = 1.0
-                return 0.2 * nn_probs + 0.8 * hsv_probs
-            return nn_probs
-
-        # Fallback to HSV histogram distribution
-        hsv_color, hsv_conf, _ = _hsv_color_fallback(crop_bgr)
-        probs = np.ones(n_classes, dtype=np.float32) * ((1.0 - hsv_conf) / max(n_classes - 1, 1))
-        if self.color_classes:
-            lower_classes = [c.lower() for c in self.color_classes]
-            if hsv_color.lower() in lower_classes:
-                probs[lower_classes.index(hsv_color.lower())] = hsv_conf
-        return probs
+        return self.predict_attributes_probs(crop_bgr)[0]
 
     def predict_type_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
-        """Return a 1D probability distribution over type_classes."""
-        n_classes = len(self.type_classes) if self.type_classes is not None else 7
-        if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
-            return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
+        return self.predict_attributes_probs(crop_bgr)[1]
 
-        if self.multitask_model is not None:
-            return self.predict_attributes_probs(crop_bgr)[1]
-
-        if self.type_model is not None:
-            return self._nn_predict_probs(crop_bgr, self.type_model)
-
-        # Fallback to aspect ratio geometric distribution when NN is absent
-        # Note: True CCTV / dashcam angles have high perspective variance.
-        probs = np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
-        h, w = crop_bgr.shape[:2]
-        if h > 0 and w > 0:
-            ar = w / float(h)
-            # Gentle soft prior rather than hard 80% bias
-            prior_weight = 0.35
-            base_prob = (1.0 - prior_weight) / max(n_classes - 1, 1)
-            probs = np.full(n_classes, base_prob, dtype=np.float32)
-            
-            target_class = None
-            if ar < 1.05:
-                target_class = "SUV"
-            elif 1.05 <= ar < 1.25:
-                target_class = "Hatchback"
-            elif 1.25 <= ar < 1.50:
-                target_class = "Sedan"
-            elif 1.50 <= ar < 1.75:
-                target_class = "Coupe"
-            else:
-                target_class = "Truck"
-
-            if target_class and target_class in self.type_classes:
-                probs[self.type_classes.index(target_class)] = prior_weight
-            elif target_class:
-                # Case-insensitive match
-                lower_types = [t.lower() for t in self.type_classes]
-                if target_class.lower() in lower_types:
-                    probs[lower_types.index(target_class.lower())] = prior_weight
-
-        return probs / np.sum(probs)
-
-    # ── Single-frame prediction API ─────────────────────────────────────
+    def predict_orientation_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
+        return self.predict_attributes_probs(crop_bgr)[2]
 
     def predict_color(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
-        """Returns (color_label, confidence)."""
         probs = self.predict_color_probs(crop_bgr)
-        if probs is None or len(probs) == 0:
-            return "Unknown", 0.0
         idx = int(np.argmax(probs))
         conf = float(probs[idx])
         label = self.color_classes[idx] if (0 <= idx < len(self.color_classes) and conf >= self.conf_cutoff) else "Unknown"
         return label, round(conf, 3)
 
     def predict_type(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
-        """Returns (type_label, confidence)."""
         probs = self.predict_type_probs(crop_bgr)
-        if probs is None or len(probs) == 0:
-            return "Unknown", 0.0
         idx = int(np.argmax(probs))
         conf = float(probs[idx])
         label = self.type_classes[idx] if (0 <= idx < len(self.type_classes) and conf >= self.conf_cutoff) else "Unknown"
         return label, round(conf, 3)
 
-    # ── Internal helpers ────────────────────────────────────────────────
-
-    @torch.no_grad()
-    def _nn_predict_probs(
-        self,
-        crop_bgr: np.ndarray,
-        model: nn.Module,
-    ) -> np.ndarray:
-        """Run a BGR crop through a MobileNetV3 model and return softmax probability vector."""
-        n_classes = len(self.color_classes) if model == self.color_model else len(self.type_classes)
-        pil_img = preprocess_crop(crop_bgr)
-        if pil_img is None:
-            return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
-
-        tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
-        logits = model(tensor)
-        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
-        if len(probs) != n_classes:
-            if len(probs) > n_classes:
-                probs = probs[:n_classes]
-                probs = probs / (np.sum(probs) + 1e-9)
-            else:
-                padded = np.zeros(n_classes, dtype=np.float32)
-                padded[:len(probs)] = probs
-                probs = padded
-        return probs
+    def predict_orientation(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
+        probs = self.predict_orientation_probs(crop_bgr)
+        idx = int(np.argmax(probs))
+        conf = float(probs[idx])
+        label = self.orientation_classes[idx] if 0 <= idx < len(self.orientation_classes) else "Rear"
+        return label, round(conf, 3)
 
     def _load_multitask_model(self, weights_path: str) -> Optional[VehicleAttributeNet]:
-        """Load unified Multi-Task VehicleAttributeNet weights."""
+        """Loads unified Multi-Task weights with backward compatibility for missing orientation heads."""
         if not weights_path or not Path(weights_path).exists():
             return None
 
@@ -511,67 +413,26 @@ class VehicleClassifier:
 
             n_c = len(self.color_classes)
             n_t = len(self.type_classes)
+            n_o = len(self.orientation_classes)
+
             if "color_head.3.weight" in cleaned_state:
                 n_c = cleaned_state["color_head.3.weight"].shape[0]
             if "type_head.3.weight" in cleaned_state:
                 n_t = cleaned_state["type_head.3.weight"].shape[0]
+            if "orientation_head.3.weight" in cleaned_state:
+                n_o = cleaned_state["orientation_head.3.weight"].shape[0]
 
-            model = VehicleAttributeNet(n_colors=n_c, n_types=n_t, pretrained=False)
-            model.load_state_dict(cleaned_state)
+            model = VehicleAttributeNet(n_colors=n_c, n_types=n_t, n_orientations=n_o, pretrained=False)
+            # Load matching weights without crashing on missing orientation head in legacy checkpoints
+            model_dict = model.state_dict()
+            pretrained_dict = {k: v for k, v in cleaned_state.items() if k in model_dict and model_dict[k].shape == v.shape}
+            model_dict.update(pretrained_dict)
+            model.load_state_dict(model_dict)
+            
             model.to(self.device)
             model.eval()
-            logger.info(f"Loaded unified Multi-Task VehicleAttributeNet ({n_c} colors, {n_t} types) from: {weights_path}")
+            logger.info(f"Loaded unified Multi-Task VehicleAttributeNet ({n_c} colors, {n_t} types, {n_o} orientations) from: {weights_path}")
             return model
         except Exception as e:
             logger.warning(f"Could not load multi-task attribute weights from {weights_path}: {e}")
-            return None
-
-    def _load_model(
-        self,
-        weights_path: str,
-        num_classes: int,
-        name: str,
-    ) -> Optional[nn.Module]:
-        """Load MobileNetV3 from weights file, auto-detecting Small vs Large architecture."""
-        if not weights_path or not Path(weights_path).exists():
-            logger.warning(
-                f"No {name} classifier weights found at '{weights_path}'. "
-                f"{'Using HSV fallback.' if name == 'color' else 'Will return Unknown.'}"
-            )
-            return None
-
-        try:
-            state = torch.load(weights_path, map_location=self.device, weights_only=False)
-            
-            # Clean keys if saved with wrapper prefix (e.g. 'net.')
-            cleaned_state = {}
-            for k, v in state.items():
-                new_key = k[4:] if k.startswith("net.") else k
-                cleaned_state[new_key] = v
-
-            # Detect output class dimension from classifier head
-            if "classifier.3.weight" in cleaned_state:
-                num_classes = cleaned_state["classifier.3.weight"].shape[0]
-
-            # Detect Small vs Large variant from classifier.0 input dimension (576 vs 960)
-            is_small = False
-            if "classifier.0.weight" in cleaned_state:
-                in_feat = cleaned_state["classifier.0.weight"].shape[1]
-                if in_feat == 576:
-                    is_small = True
-
-            if is_small:
-                model = _build_mobilenet_small(num_classes)
-                arch_name = "MobileNetV3-Small"
-            else:
-                model = _build_mobilenet_large(num_classes)
-                arch_name = "MobileNetV3-Large"
-
-            model.load_state_dict(cleaned_state)
-            model.to(self.device)
-            model.eval()
-            logger.info(f"Loaded {name} classifier ({arch_name}, {num_classes} classes) from: {weights_path}")
-            return model
-        except Exception as e:
-            logger.error(f"Failed to load {name} classifier: {e}")
             return None
