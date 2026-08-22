@@ -101,9 +101,127 @@ def estimate_sharpness(img_bgr: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+# ── Dedicated ALPR Sequence Recognition Architecture (LPRNet) ─────────────
+import torch
+import torch.nn as nn
+from pathlib import Path
+
+LPR_CHARS = [
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J",
+    "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T",
+    "U", "V", "W", "X", "Y", "Z", "-"
+]
+
+
+class SmallBasicBlock(nn.Module):
+    def __init__(self, ch_in: int, ch_out: int):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(ch_in, ch_out // 4, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(ch_out // 4, ch_out // 4, kernel_size=(3, 1), padding=(1, 0)),
+            nn.ReLU(),
+            nn.Conv2d(ch_out // 4, ch_out // 4, kernel_size=(1, 3), padding=(0, 1)),
+            nn.ReLU(),
+            nn.Conv2d(ch_out // 4, ch_out, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.block(x)
+
+
+class LPRNet(nn.Module):
+    """
+    Lightweight License Plate Recognition Network (LPRNet).
+    Specialized end-to-end convolutional character sequence model for ALPR.
+    """
+    def __init__(self, class_num: int = len(LPR_CHARS), dropout_rate: float = 0.5):
+        super().__init__()
+        self.class_num = class_num
+        self.backbone = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(3, 3), stride=(1, 1)),
+            SmallBasicBlock(64, 64),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(3, 3), stride=(2, 1)),
+            SmallBasicBlock(64, 64),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            SmallBasicBlock(64, 64),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(3, 3), stride=(2, 2)),
+            nn.Dropout(dropout_rate),
+            nn.Conv2d(64, 256, kernel_size=(1, 4), stride=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Conv2d(256, class_num, kernel_size=(13, 1), stride=1),
+            nn.BatchNorm2d(class_num),
+            nn.ReLU(),
+        )
+        self.container = nn.Sequential(
+            nn.Conv2d(448 + self.class_num, self.class_num, kernel_size=1, stride=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        keep_features = []
+        for i, layer in enumerate(self.backbone.children()):
+            x = layer(x)
+            if i in [2, 6, 13, 22]:
+                keep_features.append(x)
+
+        global_context = []
+        for i, f in enumerate(keep_features):
+            if i in [0, 1]:
+                f = nn.AvgPool2d(kernel_size=5, stride=5)(f)
+            if i in [2]:
+                f = nn.AvgPool2d(kernel_size=(4, 10), stride=(4, 2))(f)
+            f_pow = torch.pow(f, 2)
+            f_mean = torch.mean(f_pow)
+            f = torch.div(f, f_mean + 1e-5)
+            global_context.append(f)
+
+        x = torch.cat(global_context, 1)
+        x = self.container(x)
+        logits = torch.mean(x, dim=2)
+        return logits
+
+
+def decode_lpr_logits(logits: torch.Tensor, chars_list: List[str] = LPR_CHARS) -> Tuple[str, float]:
+    """
+    Greedy CTC decoder for LPR sequence logits.
+    Merges consecutive identical character predictions and strips blank tokens.
+    """
+    probs = torch.softmax(logits, dim=1)
+    max_probs, preds = torch.max(probs, dim=1)
+
+    preds_np = preds.cpu().numpy()[0]
+    probs_np = max_probs.cpu().numpy()[0]
+
+    blank_idx = len(chars_list) - 1
+    decoded_chars = []
+    char_confs = []
+
+    prev_idx = -1
+    for i, idx in enumerate(preds_np):
+        if idx != blank_idx and idx != prev_idx:
+            decoded_chars.append(chars_list[idx])
+            char_confs.append(float(probs_np[i]))
+        prev_idx = idx
+
+    raw_text = "".join(decoded_chars)
+    avg_conf = float(np.mean(char_confs)) if char_confs else 0.0
+    return raw_text, avg_conf
+
+
 class PlateOCR:
     """
-    Reads text from license plate image crops using EasyOCR.
+    Reads text from license plate image crops using dedicated ALPR (LPRNet) or EasyOCR fallback.
 
     Usage:
         ocr = PlateOCR(config)
@@ -112,26 +230,47 @@ class PlateOCR:
 
     def __init__(self, config: dict):
         self.cfg = config.get("ocr", {})
+        self.cfg_paths = config.get("paths", {})
         self.languages: List[str] = self.cfg.get("languages", ["en"])
         use_gpu = self.cfg.get("gpu", False)
         try:
-            import torch
             if use_gpu and not torch.cuda.is_available():
-                logger.warning("GPU requested for EasyOCR but CUDA is unavailable. Falling back to CPU.")
+                logger.warning("GPU requested for OCR but CUDA is unavailable. Falling back to CPU.")
                 use_gpu = False
         except Exception:
             use_gpu = False
         self.use_gpu: bool = use_gpu
+        self.device = torch.device("cuda" if (self.use_gpu and torch.cuda.is_available()) else "cpu")
         self.min_confidence: float = self.cfg.get("min_confidence", 0.15)
+
+        # ── Load Dedicated ALPR sequence model if available ────────────────
+        self.alpr_model: Optional[LPRNet] = None
+        self.alpr_chars = LPR_CHARS
+        alpr_candidates = [
+            self.cfg_paths.get("lprnet_weights", ""),
+            "models/lprnet.pt",
+            "models/lprnet.onnx",
+            "models/crnn_plate.pt",
+            "models/crnn_plate.onnx",
+        ]
+        for w_path in alpr_candidates:
+            if w_path and Path(w_path).exists():
+                try:
+                    if str(w_path).endswith(".pt"):
+                        model = LPRNet(class_num=len(self.alpr_chars))
+                        state_dict = torch.load(w_path, map_location=self.device)
+                        model.load_state_dict(state_dict)
+                        model.to(self.device)
+                        model.eval()
+                        self.alpr_model = model
+                        logger.info(f"Loaded dedicated ALPR sequence model (LPRNet) from {w_path}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Could not load dedicated ALPR model {w_path}: {e}")
 
         pre = self.cfg.get("preprocessing", {})
         self.do_grayscale: bool = pre.get("grayscale", True)
         self.do_clahe: bool = pre.get("clahe", True)
-        # NOTE: adaptive_threshold and morph_cleanup are intentionally OFF by
-        # default. Binarising plate crops destroys the gradient information
-        # that EasyOCR's CRAFT text-detector relies on, causing missed strokes
-        # and merged character loops. Disable them unless you have a specific
-        # reason (e.g. extremely high-contrast scanned plates).
         self.do_adaptive_thresh: bool = pre.get("adaptive_threshold", False)
         self.do_morph: bool = pre.get("morph_cleanup", False)
         self.do_deskew: bool = pre.get("deskew", True)
@@ -156,6 +295,13 @@ class PlateOCR:
         if plate_crop_bgr is None or plate_crop_bgr.size == 0:
             return "", 0.0
 
+        # 1. If dedicated ALPR model is loaded, run high-speed sequence recognition
+        if self.alpr_model is not None:
+            text, conf = self._read_lprnet(plate_crop_bgr)
+            if text and len(text) >= 3:
+                return text, conf
+
+        # 2. EasyOCR fallback with multi-stage preprocessing
         # Up-scale tiny crops so plate height is at least 100px for EasyOCR accuracy
         h, w = plate_crop_bgr.shape[:2]
         if h < 100 or w < 260:
@@ -169,6 +315,27 @@ class PlateOCR:
         processed = self._preprocess(plate_crop_bgr)
         raw_results = self._run_easyocr(processed)
         return self._postprocess(raw_results)
+
+    @torch.no_grad()
+    def _read_lprnet(self, plate_crop_bgr: np.ndarray) -> Tuple[str, float]:
+        """Run dedicated LPRNet sequence model inference on plate crop."""
+        try:
+            # LPRNet expects (94, 24) input in RGB
+            img = cv2.resize(plate_crop_bgr, (94, 24), interpolation=cv2.INTER_CUBIC)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = img.astype(np.float32)
+            img = (img - 127.5) * 0.0078125
+            img = np.transpose(img, (2, 0, 1))
+            tensor = torch.from_numpy(img).unsqueeze(0).to(self.device)
+
+            logits = self.alpr_model(tensor)
+            raw_text, conf = decode_lpr_logits(logits, self.alpr_chars)
+            cleaned = self._clean_text(raw_text)
+            normalized = normalize_plate_format(cleaned) if len(cleaned) == 7 else cleaned
+            return normalized, round(conf, 3)
+        except Exception as e:
+            logger.debug(f"LPRNet inference error: {e}")
+            return "", 0.0
 
     def read_all(
         self, plate_crop_bgr: np.ndarray

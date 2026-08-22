@@ -74,8 +74,9 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
     if total_pixels == 0:
         return "Unknown", 0.0
 
-    # True chromatic (vibrant color) mask requires significant saturation
-    chromatic_mask = (S >= 70) & (V >= 50)
+    # True chromatic (vibrant color) mask requires high saturation (S >= 110)
+    # Shadowed paint (S between 50 and 90) is routed to achromatic neutrals to prevent false Purple/Blue
+    chromatic_mask = (S >= 110) & (V >= 50)
     achromatic_mask = ~chromatic_mask
 
     counts = {
@@ -84,24 +85,24 @@ def _hsv_color_fallback(crop_bgr: np.ndarray) -> Tuple[str, float]:
         "Red": 0, "Silver": 0, "Tan": 0, "White": 0, "Yellow": 0,
     }
 
-    # Chromatic classification by Hue & Value
+    # Chromatic classification by Hue & Value (strictly S >= 110)
     counts["Red"] = int((chromatic_mask & (((H >= 0) & (H <= 10)) | ((H >= 165) & (H <= 180)))).sum())
-    counts["Pink"] = int((chromatic_mask & (H > 150) & (H < 165) & (S < 140)).sum())
+    counts["Pink"] = int((chromatic_mask & (H > 150) & (H < 165) & (V >= 130)).sum())
     counts["Orange"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V >= 130))).sum())
-    counts["Brown"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V < 130) & (S > 80))).sum())
-    counts["Gold"] = int((chromatic_mask & ((H > 22) & (H <= 35) & (V >= 150) & (S >= 90) & (S < 160))).sum())
+    counts["Brown"] = int((chromatic_mask & ((H > 10) & (H <= 25) & (V < 130))).sum())
+    counts["Gold"] = int((chromatic_mask & ((H > 22) & (H <= 35) & (V >= 150) & (S < 160))).sum())
     counts["Yellow"] = int((chromatic_mask & ((H > 22) & (H <= 38) & (V >= 150) & (S >= 160))).sum())
     counts["Green"] = int((chromatic_mask & ((H > 38) & (H <= 85))).sum())
     counts["Blue"] = int((chromatic_mask & ((H > 85) & (H <= 140))).sum())
-    counts["Purple"] = int((chromatic_mask & ((H > 140) & (H <= 160) & (S >= 90))).sum())
+    counts["Purple"] = int((chromatic_mask & ((H > 140) & (H <= 160))).sum())
 
-    # Achromatic / Neutral classification by Value & Saturation
-    counts["White"] = int((achromatic_mask & (V >= 190)).sum())
-    counts["Silver"] = int((achromatic_mask & (V >= 130) & (V < 190) & (S <= 35)).sum())
-    counts["Beige"] = int((achromatic_mask & (V >= 140) & (S > 35) & (H >= 15) & (H <= 40)).sum())
-    counts["Tan"] = int((achromatic_mask & (V >= 90) & (V < 140) & (S > 35) & (H >= 10) & (H <= 40)).sum())
-    counts["Grey"] = int((achromatic_mask & (V >= 60) & (V < 130) & (S <= 35)).sum())
-    counts["Black"] = int((achromatic_mask & (V < 60)).sum())
+    # Achromatic / Neutral classification (all S < 110 pixels)
+    counts["White"] = int((achromatic_mask & (V >= 185) & (S <= 45)).sum())
+    counts["Silver"] = int((achromatic_mask & (V >= 125) & (V < 185) & (S <= 45)).sum())
+    counts["Beige"] = int((achromatic_mask & (V >= 135) & (S > 45) & (H >= 15) & (H <= 40)).sum())
+    counts["Tan"] = int((achromatic_mask & (V >= 75) & (V < 135) & (S > 45) & (H >= 10) & (H <= 40)).sum())
+    counts["Grey"] = int((achromatic_mask & (V >= 50) & (V < 125) & (S <= 45)).sum())
+    counts["Black"] = int((achromatic_mask & (V < 50)).sum())
 
     total_chromatic = sum(counts[c] for c in ["Red", "Pink", "Orange", "Brown", "Gold", "Yellow", "Green", "Blue", "Purple"])
 

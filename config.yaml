@@ -11,12 +11,14 @@ paths:
   # Trained weights (placed here after training on your RTX 3060 PC)
   vehicle_attributes_weights: "models/vehicle_attributes.pt"  # Unified Multi-Task (Color + Type)
   yolo_weights: "models/plate_detector.pt"
+  lprnet_weights: "models/lprnet.pt"                          # Dedicated sequence ALPR model
   color_weights: "models/color_classifier.pt"
   type_weights:  "models/type_classifier.pt"
 
   # ONNX variants (optional, faster on CPU)
   vehicle_attributes_onnx: "models/vehicle_attributes.onnx"
   yolo_onnx:   "models/plate_detector.onnx"
+  lprnet_onnx: "models/lprnet.onnx"
   color_onnx:  "models/color_classifier.onnx"
   type_onnx:   "models/type_classifier.onnx"
 
