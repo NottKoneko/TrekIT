@@ -158,6 +158,40 @@ def parse_veri776(veri_dir: Path) -> List[Tuple[Path, int, int]]:
     return samples
 
 
+def organize_veri_imagefolder(veri_dir: Path, output_dir: Path = Path("data/veri_organized")) -> Tuple[Path, Path]:
+    """
+    Organizes VeRi-776 images into ImageFolder-ready directory trees:
+      - data/veri_organized/color/<color_name>/<img_name>.jpg
+      - data/veri_organized/type/<type_name>/<img_name>.jpg
+    """
+    import shutil
+    color_root = output_dir / "color"
+    type_root = output_dir / "type"
+
+    for c in TREKIT_COLORS:
+        (color_root / c).mkdir(parents=True, exist_ok=True)
+    for t in TREKIT_TYPES:
+        (type_root / t).mkdir(parents=True, exist_ok=True)
+
+    samples = parse_veri776(veri_dir)
+    logger.info(f"Organizing {len(samples)} images into {output_dir}...")
+
+    for path, c_idx, t_idx in tqdm(samples, desc="Organizing VeRi ImageFolders"):
+        c_name = TREKIT_COLORS[c_idx]
+        t_name = TREKIT_TYPES[t_idx]
+
+        dst_c = color_root / c_name / path.name
+        if not dst_c.exists():
+            shutil.copyfile(path, dst_c)
+
+        dst_t = type_root / t_name / path.name
+        if not dst_t.exists():
+            shutil.copyfile(path, dst_t)
+
+    logger.info(f"Done! ImageFolders ready at:\n  Color: {color_root}\n  Type:  {type_root}")
+    return color_root, type_root
+
+
 def train_vehicle_attribute_net(
     data_dir: str = "data/veri776",
     epochs: int = 30,
