@@ -292,9 +292,12 @@ class VehicleClassifier:
 
     def predict_color_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
         """Return a 1D probability distribution over color_classes."""
-        n_classes = len(self.color_classes)
-        if crop_bgr is None or crop_bgr.size == 0:
+        n_classes = len(self.color_classes) if self.color_classes is not None else 15
+        if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
             return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
+
+        if self.multitask_model is not None:
+            return self.predict_attributes_probs(crop_bgr)[0]
 
         if self.color_model is not None:
             return self._nn_predict_probs(crop_bgr, self.color_model)
@@ -302,15 +305,20 @@ class VehicleClassifier:
         # Fallback to HSV histogram distribution
         hsv_color, hsv_conf = _hsv_color_fallback(crop_bgr)
         probs = np.ones(n_classes, dtype=np.float32) * ((1.0 - hsv_conf) / max(n_classes - 1, 1))
-        if hsv_color in self.color_classes:
-            probs[self.color_classes.index(hsv_color)] = hsv_conf
+        if self.color_classes:
+            lower_classes = [c.lower() for c in self.color_classes]
+            if hsv_color.lower() in lower_classes:
+                probs[lower_classes.index(hsv_color.lower())] = hsv_conf
         return probs
 
     def predict_type_probs(self, crop_bgr: np.ndarray) -> np.ndarray:
         """Return a 1D probability distribution over type_classes."""
-        n_classes = len(self.type_classes)
-        if crop_bgr is None or crop_bgr.size == 0:
+        n_classes = len(self.type_classes) if self.type_classes is not None else 7
+        if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
             return np.ones(n_classes, dtype=np.float32) / max(n_classes, 1)
+
+        if self.multitask_model is not None:
+            return self.predict_attributes_probs(crop_bgr)[1]
 
         if self.type_model is not None:
             return self._nn_predict_probs(crop_bgr, self.type_model)
@@ -337,7 +345,7 @@ class VehicleClassifier:
     def predict_color(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         """Returns (color_label, confidence)."""
         probs = self.predict_color_probs(crop_bgr)
-        if len(probs) == 0:
+        if probs is None or len(probs) == 0:
             return "Unknown", 0.0
         idx = int(np.argmax(probs))
         conf = float(probs[idx])
@@ -347,7 +355,7 @@ class VehicleClassifier:
     def predict_type(self, crop_bgr: np.ndarray) -> Tuple[str, float]:
         """Returns (type_label, confidence)."""
         probs = self.predict_type_probs(crop_bgr)
-        if len(probs) == 0:
+        if probs is None or len(probs) == 0:
             return "Unknown", 0.0
         idx = int(np.argmax(probs))
         conf = float(probs[idx])

@@ -63,6 +63,9 @@ def normalize_plate_format(text: str) -> str:
     Applies California & standard US 7-character plate format disambiguation.
     Standard Format: 1 Digit - 3 Letters - 3 Digits (e.g. 9JWM255, 8MZW276, 1ABC123)
     """
+    if not text:
+        return ""
+
     if len(text) != 7:
         return text
 
@@ -84,6 +87,8 @@ def normalize_plate_format(text: str) -> str:
     for i in (4, 5, 6):
         if chars[i] in DIGIT_MAP:
             chars[i] = DIGIT_MAP[chars[i]]
+
+    return "".join(chars)
 
 def estimate_sharpness(img_bgr: np.ndarray) -> float:
     """
@@ -325,19 +330,19 @@ class PlateOCR:
         avg_conf = sum(it["conf"] for it in valid_items) / max(len(valid_items), 1)
 
         # Apply California format normalization (e.g. 1 Digit - 3 Letters - 3 Digits)
-        normalized_merged = normalize_plate_format(merged_text)
+        normalized_merged = normalize_plate_format(merged_text) if merged_text else ""
 
         # Check strictly for length between 5 and 8
-        if 5 <= len(normalized_merged) <= 8 and self._matches_plate_pattern(normalized_merged):
+        if normalized_merged and 5 <= len(normalized_merged) <= 8 and self._matches_plate_pattern(normalized_merged):
             return normalized_merged, round(avg_conf, 3)
 
-        if 5 <= len(merged_text) <= 8 and self._matches_plate_pattern(merged_text):
+        if merged_text and 5 <= len(merged_text) <= 8 and self._matches_plate_pattern(merged_text):
             return merged_text, round(avg_conf, 3)
 
         # Fallback: check if any individual candidate is valid (5-8 chars)
         for it in sorted(valid_items, key=lambda x: -x["conf"]):
-            candidate = normalize_plate_format(it["text"])
-            if 5 <= len(candidate) <= 8 and self._matches_plate_pattern(candidate):
+            candidate = normalize_plate_format(it.get("text", "")) if it.get("text") else ""
+            if candidate and 5 <= len(candidate) <= 8 and self._matches_plate_pattern(candidate):
                 return candidate, round(it["conf"], 3)
 
         return "", 0.0

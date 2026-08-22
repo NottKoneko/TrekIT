@@ -70,7 +70,7 @@ def records_to_df(records: list) -> pd.DataFrame:
             "Track ID": r.track_id,
             "Plate": r.plate_text or "—",
             "Plate Conf": f"{r.plate_conf:.0%}",
-            "Color": r.color,
+            "Color": r.color.capitalize() if r.color and r.color.lower() != "unknown" else (r.color or "—"),
             "Color Conf": f"{r.color_conf:.0%}",
             "Type": r.vehicle_type,
             "Type Conf": f"{r.type_conf:.0%}",
@@ -259,33 +259,59 @@ def process_video(
 
 # ── Tab 2: Image Analysis ───────────────────────────────────────────────────
 
-def process_image(image: np.ndarray):
-    if image is None or getattr(image, "size", 0) == 0:
-        return None, "No image uploaded."
+def process_image(image):
+    if image is None:
+        return None, "⚠️ Please upload an image first."
+
+    # Handle Gradio Image dict format (e.g. if editor/brush enabled)
+    if isinstance(image, dict):
+        image = image.get("image") or image.get("composite")
+        if image is None:
+            return None, "⚠️ Please upload an image first."
+
+    # Handle PIL Image
+    if hasattr(image, "convert"):
+        image = np.array(image.convert("RGB"))
+
+    if not isinstance(image, np.ndarray) or getattr(image, "size", 0) == 0:
+        return None, "⚠️ Invalid image format."
 
     pipeline = get_pipeline()
     try:
         # Gradio passes RGB numpy arrays — convert to BGR for OpenCV
-        frame_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        if len(image.shape) == 2:
+            frame_bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif len(image.shape) == 3 and image.shape[2] == 4:
+            frame_bgr = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+        elif len(image.shape) == 3 and image.shape[2] == 3:
+            frame_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        else:
+            return None, "❌ Unsupported image channels."
+
         annotated_bgr, records = pipeline.process_image(frame_bgr)
         annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+
+        if not records:
+            return annotated_rgb, "ℹ️ No vehicles detected in this image."
 
         lines = [f"**{len(records)} vehicle(s) detected:**"]
         for r in records:
             parts = []
-            if r.color and r.color != "Unknown":
-                parts.append(f"**Color:** {r.color} ({r.color_conf:.0%})")
+            if r.color and r.color.lower() != "unknown":
+                parts.append(f"**Color:** {r.color.capitalize()} ({r.color_conf:.0%})")
             if r.vehicle_type and r.vehicle_type != "Unknown":
                 parts.append(f"**Type:** {r.vehicle_type} ({r.type_conf:.0%})")
             if r.plate_text:
                 parts.append(f"**Plate:** `{r.plate_text}`")
             if parts:
                 lines.append("- " + " | ".join(parts))
+            else:
+                lines.append(f"- Vehicle #{r.track_id}")
 
         return annotated_rgb, "\n".join(lines)
     except Exception as e:
         logger.exception("Error during image processing:")
-        return image, f"❌ Error processing image: {str(e)}"
+        return (image if isinstance(image, np.ndarray) else None), f"❌ Error processing image: {str(e)}"
 
 
 # ── Tab 3: Live Webcam ──────────────────────────────────────────────────────

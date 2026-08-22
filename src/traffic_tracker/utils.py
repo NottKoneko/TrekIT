@@ -85,16 +85,17 @@ def draw_vehicle_overlay(
     if x2 <= x1 or y2 <= y1:
         return frame
 
-    box_colour = _COLOUR_PALETTE.get(color_label, _DEFAULT_BOX_COLOUR)
+    color_key = color_label.capitalize() if color_label else ""
+    box_colour = _COLOUR_PALETTE.get(color_key, _COLOUR_PALETTE.get(color_label, _DEFAULT_BOX_COLOUR))
 
     # Main bounding box (2px thick)
     cv2.rectangle(frame, (x1, y1), (x2, y2), box_colour, 2)
 
     # Compose label string
     parts = [f"#{track_id}"]
-    if color_label and color_label != "Unknown":
-        parts.append(color_label)
-    if type_label and type_label != "Unknown":
+    if color_label and color_label.lower() != "unknown":
+        parts.append(color_label.capitalize())
+    if type_label and type_label.lower() != "unknown":
         parts.append(type_label)
     if plate_text:
         parts.append(f"[{plate_text}]")
