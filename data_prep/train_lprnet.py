@@ -209,4 +209,12 @@ def train_lprnet(
 
 
 if __name__ == "__main__":
-    train_lprnet()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--output", type=str, default="models/lprnet.pt")
+    args = parser.parse_args()
+
+    train_lprnet(epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, output_path=args.output)

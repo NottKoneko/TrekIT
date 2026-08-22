@@ -128,31 +128,50 @@ class VeRiAttributeDataset(Dataset):
 def parse_veri776(veri_dir: Path) -> List[Tuple[Path, int, int]]:
     """
     Parses VeRi-776 annotations from XML files, list text files, or directory trees.
+    Supports train_label.xml and test_label.xml with multi-byte XML declarations.
     """
+    if (veri_dir / "VeRi").exists():
+        veri_dir = veri_dir / "VeRi"
+
     samples = []
-    xml_path = veri_dir / "train_label.xml"
-    img_dir = veri_dir / "image_train"
-    if not img_dir.exists():
-        img_dir = veri_dir
+    xml_targets = [
+        (veri_dir / "train_label.xml", veri_dir / "image_train"),
+        (veri_dir / "test_label.xml", veri_dir / "image_test"),
+    ]
 
-    if xml_path.exists():
-        logger.info(f"Parsing VeRi-776 XML: {xml_path}")
-        tree = ET.parse(xml_path)
-        root = tree.getroot()
-        for item in root.findall(".//Item"):
-            img_name = item.get("imageName")
-            c_id = int(item.get("colorID", 0))
-            t_id = int(item.get("typeID", 0))
+    import re
+    for xml_path, img_dir in xml_targets:
+        if not img_dir.exists():
+            img_dir = veri_dir
 
-            c_name = VERI_COLOR_MAP.get(c_id, "grey")
-            t_name = VERI_TYPE_MAP.get(t_id, "Sedan")
+        if xml_path.exists():
+            logger.info(f"Parsing VeRi-776 XML: {xml_path}")
+            try:
+                raw_bytes = xml_path.read_bytes()
+                try:
+                    raw_text = raw_bytes.decode("gb18030", errors="ignore")
+                except Exception:
+                    raw_text = raw_bytes.decode("utf-8", errors="ignore")
 
-            c_idx = TREKIT_COLORS.index(c_name.lower()) if c_name.lower() in TREKIT_COLORS else 6
-            t_idx = TREKIT_TYPES.index(t_name) if t_name in TREKIT_TYPES else 4
+                clean_xml = re.sub(r"<\?xml[^>]*\?>", "", raw_text)
+                root = ET.fromstring(clean_xml)
 
-            p = img_dir / img_name
-            if p.exists():
-                samples.append((p, c_idx, t_idx))
+                for item in root.findall(".//Item"):
+                    img_name = item.get("imageName")
+                    c_id = int(item.get("colorID", 0))
+                    t_id = int(item.get("typeID", 0))
+
+                    c_name = VERI_COLOR_MAP.get(c_id, "grey")
+                    t_name = VERI_TYPE_MAP.get(t_id, "Sedan")
+
+                    c_idx = TREKIT_COLORS.index(c_name.lower()) if c_name.lower() in TREKIT_COLORS else 6
+                    t_idx = TREKIT_TYPES.index(t_name) if t_name in TREKIT_TYPES else 4
+
+                    p = img_dir / img_name
+                    if p.exists():
+                        samples.append((p, c_idx, t_idx))
+            except Exception as e:
+                logger.warning(f"Error reading {xml_path}: {e}")
 
     logger.info(f"Parsed {len(samples)} valid VeRi-776 multi-task samples.")
     return samples
