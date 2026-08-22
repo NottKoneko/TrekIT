@@ -418,7 +418,7 @@ class TrafficPipeline:
 
             for plate_det in vehicle.plates:
                 # Gating: only run on confident plate boxes (>= 0.35 confidence and area >= 150px)
-                if plate_det.conf < 0.35:
+                if plate_det.confidence < 0.35:
                     continue
                 pw = plate_det.bbox[2] - plate_det.bbox[0]
                 ph = plate_det.bbox[3] - plate_det.bbox[1]

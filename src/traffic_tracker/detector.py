@@ -34,6 +34,10 @@ class Detection:
     bbox: Tuple[int, int, int, int]   # x1, y1, x2, y2 (pixel coords)
     is_plate: bool = False
 
+    @property
+    def conf(self) -> float:
+        return self.confidence
+
 
 @dataclass
 class VehicleDetection:
@@ -42,6 +46,10 @@ class VehicleDetection:
     bbox: Tuple[int, int, int, int]     # vehicle bbox
     confidence: float
     plates: List[Detection] = field(default_factory=list)
+
+    @property
+    def conf(self) -> float:
+        return self.confidence
 
 
 class VehicleDetector:
