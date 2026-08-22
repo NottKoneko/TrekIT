@@ -11,7 +11,7 @@ paths:
   # Trained weights (placed here after training on your RTX 3060 PC)
   vehicle_attributes_weights: "models/vehicle_attributes.pt"  # Unified Multi-Task (Color + Type)
   yolo_weights: "models/plate_detector.pt"
-  lprnet_weights: "models/lprnet.pt"                          # Dedicated sequence ALPR model
+  # lprnet_weights: "models/lprnet.pt"                          # Dedicated sequence ALPR model
   color_weights: "models/color_classifier.pt"
   type_weights:  "models/type_classifier.pt"
 
@@ -31,9 +31,9 @@ pretrained:
 
 # ── Detection ───────────────────────────────────────────────
 detection:
-  confidence_threshold: 0.45      # Vehicle detection confidence threshold (eliminates background artifacts)
+  confidence_threshold: 0.20      # Vehicle detection confidence threshold
   nms_iou_threshold: 0.45         # Non-max suppression IoU (merges duplicate boxes)
-  min_box_area: 2500              # Min bounding box area in pixels (50x50) to ignore distant noise
+  min_box_area: 100               # Min bounding box area in pixels
   input_size: 640                 # 640px / 1024px input resolution
   device: "cuda"                  # CUDA GPU (e.g. RTX 3060 12GB) or CPU
   plate_check_every_n: 1          # Check plate on every frame per track

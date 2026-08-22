@@ -378,15 +378,12 @@ class TrafficPipeline:
             plate_conf = 0.0
             best_plate_det = None
 
-            if body_crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(body_crop)
-            elif type_crop is not None:
-                color_lbl, color_conf = self.classifier.predict_color(type_crop)
-
             if type_crop is not None:
-                type_lbl, type_conf = self.classifier.predict_type(type_crop)
+                color_lbl, color_conf = self.classifier.predict_color(type_crop)
+                type_lbl, type_conf   = self.classifier.predict_type(type_crop)
             elif body_crop is not None:
-                type_lbl, type_conf = self.classifier.predict_type(body_crop)
+                color_lbl, color_conf = self.classifier.predict_color(body_crop)
+                type_lbl, type_conf   = self.classifier.predict_type(body_crop)
 
             best_text = ""
             best_score = 0.0
